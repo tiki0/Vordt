@@ -24,7 +24,8 @@ project root. Stop if scope is missing, invalid, or does not permit the requeste
 Perform read-only functionality analysis. Use trusted static parsers/text tools where
 available, without importing or executing target modules, build scripts, dependency
 install hooks, or tests. Do not hunt vulnerabilities, craft payloads, contact target
-services, or modify target code. Write only assessment artifacts under `scan-structure/`.
+services, or modify target code. Write assessment artifacts under `scan-structure/`;
+shared `.vordt/` bookkeeping via the harness tools is also permitted.
 
 ## Procedure
 

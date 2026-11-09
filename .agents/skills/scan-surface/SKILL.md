@@ -25,7 +25,8 @@ what `/skill:scan-structure` must refresh. Do not fabricate a missing inventory.
 
 Perform static analysis only. Do not execute/import target code, install dependencies,
 craft payloads, contact services, issue vulnerability verdicts, or modify source.
-Write assessment artifacts only under `scan-surface/`.
+Write assessment artifacts under `scan-surface/`; shared `.vordt/` bookkeeping via
+the harness tools is also permitted.
 
 ## Procedure
 

@@ -15,8 +15,13 @@ findings.
 
 ## Required inputs
 
-- `scan-structure/report.md`, `scan-surface/report.md`, `scan-vulns/report.md`.
-- `exploit/report.md` and its `poc/` artifacts, if present.
+- `scan-structure/report.md`, `scan-surface/report.md`, `scan-vulns/report.md`, or
+  explicitly selected archived snapshots covering the focus. Record the exact paths,
+  run IDs, and hashes consumed; do not require the canonical report to cover everything.
+- `exploit/report.md` (or a selected archived snapshot) and its `poc/` artifacts, if used.
+  Exploitation is optional: absence does not block a static-only assessment. Stale exploit
+  evidence cannot establish current verification; omit it with an explicit limitation
+  or request the exploit pass rerun if the requested deliverable depends on that proof.
 - User focus text (e.g. "executive first", "only HIGH+", "HackerOne format"), and any
   previous final report/history for context and ID continuity.
 
@@ -36,12 +41,15 @@ Do not convert a candidate with no execution evidence into a confirmed finding.
   steps, versus unverified candidates with hypothesized triggers and missing proof.
 - Do not execute, import, or contact systems to gather new evidence. Only organize and
   reference evidence already present in the pipeline reports.
-- Write only assessment artifacts under `report/`. Never alter source or prior reports.
+- Write assessment artifacts under `report/`; shared `.vordt/` bookkeeping via the
+  harness tools is also permitted. Never alter source or upstream reports.
 
 ## Procedure
 
-1. Read all input reports and POC artifacts. Confirm IDs, locations, and verification
-   status link correctly across passes. Flag contradictions or gaps.
+1. Read each selected report's header and handoff, then the relevant finding/source/POC
+   sections and artifacts for the focus. Confirm IDs, locations, and verification status
+   link correctly across passes. Flag contradictions or gaps; do not load unrelated
+   function inventories wholesale.
 2. Build the severity summary from supporting impact, prerequisites, and verification
    status. Confidence and runtime proof are separate inputs; do not conflate a verified
    POC with high confidence. A low-impact but proven issue stays low severity.
@@ -74,12 +82,13 @@ header** followed by:
 
 ## Findings
 ### <VORDT-...> — <title> (<project-root-relative path>, lines <start>–<end>)
-- **Status:** verified | candidate (unverified) | blocked
+- **Finding verification:** verified | candidate (unverified)
+- **POC outcome:** VALID | FAILED | BLOCKED | NOT ATTEMPTED | none — <exact upstream result/run ID; do not collapse FAILED/BLOCKED into proof of safety>
 - **Summary:** <1-2 sentence plain-language impact>
 - **Technical details:** <root cause, affected FUNC IDs/ranges, attack path with INPUT/FUNC IDs>
 - **Proof of concept:** <verified: artifact path, exact command, observed output/effect;
   candidate: hypothesized trigger and missing proof, explicitly unverified>
-- **Reproducible steps:** <numbered steps on a clean checkout; only when verified>
+- **Reproducible steps:** <numbered steps on the recorded commit plus required source changes/fixtures and dependency versions; only when verified; reference snapshot hashes for non-Git targets>
 - **CVSS severity:** <v3.1/4.0 vector, score, label, per-metric justification; or not scored — insufficient evidence>
 - **Remediation:** <concrete code/config changes tied to root cause, verification note>
 - **Confidence and verification:** <confidence from scan-vulns; VALID evidence from exploit; or none>

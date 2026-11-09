@@ -3,7 +3,10 @@
 Read this file before performing any pipeline pass. These rules apply to all five
 skills; the individual `SKILL.md` supplies the pass-specific procedure and schema.
 Resolve paths in this document relative to the configured project root unless stated
-otherwise. The project root is not necessarily Pi's working directory.
+otherwise. The project root is not necessarily Pi's working directory. Each pass may
+write its own option directory plus shared bookkeeping under `.vordt/`; never modify
+another pass's reports, target source, or engagement scope. Bookkeeping is an explicit
+exception to pass-specific “write only under <option>/” restrictions.
 
 ## Preconditions and scope
 
@@ -43,8 +46,14 @@ otherwise. The project root is not necessarily Pi's working directory.
 - Use stable IDs: `FUNC-001` for functions, `INPUT-001` for input points, and `VORDT-001`
   for vulnerability findings. Slugs and titles may change; IDs must not.
 - On reruns, read the previous report and relevant history first. Match existing records
-  by source identity/root cause, not line number alone; keep their IDs. Allocate new
-  IDs above the previous maximum. Never recycle retired IDs or renumber by severity.
+  by source identity/root cause, not line number alone; keep their IDs. Use `vordt_ids`
+  with a non-secret stable `identity` and ID `type` to reserve/reuse an ID atomically.
+  Use qualified symbol + file + enclosing callable for functions, boundary + expression
+  for inputs, and root cause + violated property for findings. Avoid line numbers alone.
+  A source move/rename requires identity review; do not silently allocate a duplicate.
+- For legacy report IDs, verify the source identity, then explicitly adopt the old ID
+  using `existingId`. Never invent IDs manually after registry bootstrap. Registry entries
+  persist even when findings are retired; never recycle IDs or renumber by severity.
 - Carry IDs unchanged across surface traces, vulnerability findings, POC artifacts,
   and the final report. Deduplicate findings with the same root cause; record distinct
   impacts or attack paths under that finding where appropriate.
@@ -81,7 +90,7 @@ Every `<option>/report.md` starts with its title and these fields (use explicit 
 ```markdown
 # <option> report
 
-- **Run ID / UTC date:** <unique UTC timestamp, with suffix if needed>
+- **Run ID / UTC date:** <UTC-prefixed run ID from vordt_manifest; no spaces or slashes>
 - **Project root:** <absolute configured root>
 - **Source revision:** <Git commit, or non-Git>
 - **Working tree:** <clean/dirty/unknown; source changes or a reference to their list>
@@ -107,19 +116,41 @@ The Vordt extension registers deterministic helpers as tools the agent can call 
 They reduce error-prone bookkeeping; their outputs still count as evidence and must be
 reported, not presumed:
 
-- `vordt_manifest` — at pass start, record the UTC run id, git revision, SCOPE digest, and
-  a per-file SHA-256 inventory under `.vordt/manifests/<run-id>.json`. Use its run id for
-  the report header and `history/` archiving.
-- `vordt_ids` — before assigning any `FUNC-`/`INPUT-`/`VORDT-` id, ask for the highest
-  already-allocated number (across `report.md` and `history/`) so stable IDs are never
-  reused. It counts any mention, so a value may be higher than the count of headings.
-- `vordt_archive` — before replacing a report, move the prior `report.md` to
-  `history/<run-id>/report.md` with collision-safe suffixes.
-- `vordt_validate_report` — before finishing, check the report for the shared required
-  markers (header fields, handoff, source manifest).
+All tools resolve the selected root from the calling session and re-check `SCOPE.md`.
+An optional compatibility `root` argument must canonically match that selection; it
+cannot select another engagement. Helpers do not interpret Markdown authorization:
+accept scope and derive the approved coverage boundary before calling them.
 
-If a tool is unavailable or fails, fall back to the manual procedure described below and
-record the deviation. Never treat a tool failure as permission to skip the requirement.
+- `vordt_manifest` — pass explicit approved project-relative `paths` (files/directories,
+  no globs) and `exclusions`. Exclusions prune before content reads. Do not use `.` unless
+  the whole root is authorized for content inventory. Record its UTC/UUID run ID, source
+  revision, SCOPE digest and inventory at `.vordt/manifests/<run-id>.json` in the header.
+  Read the JSON's `coverage`, `errors`, `skipped`, `truncated`, `limits` and `gitErrors`.
+  Limits/unreadable paths must be resolved or disclosed; never promote partial inventory
+  to whole-boundary completeness. Hashing is **not source review**: the report's Source
+  manifest must identify only files actually reviewed. File enumeration/hashes are a
+  best-effort snapshot, not a transactional guarantee; compare again before completion.
+  `.git` and `.vordt` are reserved metadata; recognized Vordt reports are excluded.
+  Explicitly exclude known generated POC/dependency/build trees when appropriate. Other
+  option-named paths are not automatically assumed generated. Unknown dirty files remain
+  visible rather than being silently hidden as artifacts.
+- `vordt_ids` — reserve/reuse by `type` and stable source `identity`, optionally adopting
+  a historically backed `existingId` after source review. `.vordt/ids.json` is the durable
+  registry. Initial bootstrap scans all canonical/history reports without silently
+  ignoring unreadable paths. Later reservations use the registry, not repeated history
+  scans. Root-wide locking prevents concurrent allocation of duplicate IDs.
+- `vordt_archive` — pass only `option` (no run ID override). Archive the prior report
+  under **its own** run ID, with exclusive publication and collision-safe suffixes.
+  Legacy reports without IDs get a unique fallback. No prior report is a harmless no-op.
+- `vordt_validate_report` — check populated headers, valid coverage, matching root/scope,
+  pass-specific sections, Source manifest and Handoff for every pass. A blocked report
+  needs the shared fields/sections but may omit unperformed pass-specific results.
+  “Structure checks passed” does not establish correctness of findings or evidence.
+
+If a helper fails, stop the dependent mutation and record/resolve the blocker; never
+bypass root/path checks or manually allocate IDs to get past it. If helpers are unavailable,
+ask the user to load/reload the extension. An abandoned lock must be inspected by the user
+once no process owns it; do not automatically remove a live lock.
 
 ## Coverage and reruns
 

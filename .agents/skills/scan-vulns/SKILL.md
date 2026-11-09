@@ -25,7 +25,8 @@ stale, or insufficient, write a blocked report naming the pass and areas to refr
 
 Perform static analysis and reasoning only. Do not execute/import target code, install
 its dependencies, craft/run exploits, contact services, or modify target source.
-Write assessment artifacts only under `scan-vulns/`. Runtime validation belongs to exploit.
+Write assessment artifacts under `scan-vulns/`; shared `.vordt/` bookkeeping via the
+harness tools is also permitted. Runtime validation belongs to exploit.
 
 ## Procedure
 

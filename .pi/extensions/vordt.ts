@@ -1,690 +1,552 @@
-/**
- * Vordt — whitebox pentesting harness companion extension.
- *
- * Responsibilities:
- *  - /vordt-root <dir>   : set the project root for THIS session (must contain SCOPE.md).
- *    - `clear` / `none`  : clear the root for this session.
- *  - Gate /skill:<vordt skill> invocations: refuse to run unless a project root is set for
- *    this session and a valid SCOPE.md exists IN that root. On success, inject the root,
- *    scope-file, scope digest, and full SCOPE.md content into the invocation.
- *  - Show the project root (and SCOPE.md presence) in the bottom-left footer status line.
- *  - Deterministic helpers the pipeline can call directly (registered as tools):
- *      vordt_ids          — highest allocated FUNC/INPUT/VORDT id across reports+history.
- *      vordt_manifest     — UTC run id, git revision, and a file->SHA-256 inventory manifest.
- *      vordt_archive      — move <option>/report.md into <option>/history/<run-id>/.
- *      vordt_validate_report — check a report for the required shared-structure markers.
+/** Vordt: session-root gating and deterministic, contained assessment bookkeeping.
+ * These checks are not an OS sandbox. Do not run against a concurrently hostile filesystem.
  */
-
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-  appendFileSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  renameSync,
-  readdirSync,
+  constants, closeSync, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readSync, realpathSync, renameSync, unlinkSync, writeFileSync, linkSync, rmdirSync, readdirSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { open, readdir } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-const APP_NAME = "Vordt";
-const SCOPE_FILE = "SCOPE.md";
-const CONFIG_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-const CONFIG_FILE = join(CONFIG_DIR, "vordt.json");
-const LOG_FILE = join(CONFIG_DIR, "vordt.log");
-const MAX_SCOPE_BYTES = 512 * 1024;
-const MAX_MANIFEST_FILES = 8000;
-const DEFAULT_SESSION = "__default__";
+export const OPTIONS = ["scan-structure", "scan-surface", "scan-vulns", "exploit", "report"] as const;
+export type Option = typeof OPTIONS[number];
+export type Family = "FUNC" | "INPUT" | "VORDT";
+const optionSchema = Type.Union(OPTIONS.map(x => Type.Literal(x)));
+const familySchema = Type.Union([Type.Literal("FUNC"), Type.Literal("INPUT"), Type.Literal("VORDT")]);
+const MAX_SCOPE = 512 * 1024;
+const MAX_REPORT = 16 * 1024 * 1024;
+const exec = promisify(execFile);
+const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const code = (error: unknown) => (error as NodeJS.ErrnoException).code;
 
-/** Skills that belong to the Vordt pipeline and require SCOPE.md. */
-const VORDT_SKILLS = [
-  "scan-structure",
-  "scan-surface",
-  "scan-vulns",
-  "exploit",
-  "report",
-] as const;
-
-/** Widened membership check for the pipeline options. */
-const VORDT_SKILLS_SET: ReadonlySet<string> = new Set(VORDT_SKILLS);
-
-/** TypeBox enum of the five pipeline options, for tool parameters. */
-const OPTION_ENUM = Type.Union([
-  Type.Literal("scan-structure"),
-  Type.Literal("scan-surface"),
-  Type.Literal("scan-vulns"),
-  Type.Literal("exploit"),
-  Type.Literal("report"),
-]);
-
-/** TypeBox enum of the stable ID families. */
-const ID_TYPE_ENUM = Type.Union([
-  Type.Literal("FUNC"),
-  Type.Literal("INPUT"),
-  Type.Literal("VORDT"),
-]);
-
-interface VordtConfig {
-  /** Session id -> project root. A root is scoped to the session that set it. */
-  roots: Record<string, string>;
-}
-
-/** Used while /vordt-root or a skill gate is being evaluated (light busy guard). */
-let currentRoot: string | null = null;
-
-// ---------------------------------------------------------------------------
-// Hash / log / config helpers
-// ---------------------------------------------------------------------------
-
-function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
-}
-
-function logDiagnostic(msg: string): void {
-  try {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`, "utf8");
-  } catch {
-    /* never let logging break the extension */
+function statOrMissing(path: string) {
+  try { return lstatSync(path); } catch (error) {
+    if (code(error) === "ENOENT") return undefined;
+    throw error;
   }
 }
 
-/** UI notification where possible; durable log line otherwise (print/json modes). */
-function notify(ctx: { hasUI: boolean }, msg: string, level: "info" | "warning" | "error"): void {
-  if (ctx.hasUI) {
-    try {
-      (ctx as { ui?: { notify: (m: string, l: "info" | "warning" | "error") => void } }).ui?.notify?.(msg, level);
-    } catch {
-      logDiagnostic(`[${level}] ${msg}`);
+/** Canonical root; callers persist this value, never an unvalidated path alias. */
+export function canonicalRoot(path: string): string {
+  if (!isAbsolute(path)) throw new Error("Project root must be absolute");
+  const root = realpathSync(path);
+  if (/[\u0000-\u001f\u007f]/.test(root)) throw new Error("Control characters are not permitted in the project root");
+  if (!lstatSync(root).isDirectory()) throw new Error("Project root is not a directory");
+  return root;
+}
+
+/** Reject traversal, symlinks (including dangling ones), and non-directory ancestors.
+ * Missing suffixes are allowed for new artifacts. Root must already be canonical.
+ */
+export function safePath(root: string, rel: string): string {
+  if (typeof rel !== "string" || !rel || isAbsolute(rel) || rel.includes("\\") || rel.includes("\0")) {
+    throw new Error("Expected a project-relative path");
+  }
+  if (rel.split("/").includes("..")) throw new Error("Path traversal is not permitted");
+  const target = resolve(root, rel);
+  const diff = relative(root, target);
+  if (diff === ".." || diff.startsWith(`..${sep}`) || isAbsolute(diff)) throw new Error("Path escapes project root");
+  let current = root;
+  const parts = diff ? diff.split(sep) : [];
+  for (let i = 0; i < parts.length; i++) {
+    current = join(current, parts[i]);
+    const st = statOrMissing(current);
+    if (!st) continue;
+    if (st.isSymbolicLink()) throw new Error(`Symlink path rejected: ${rel}`);
+    if (i < parts.length - 1 && !st.isDirectory()) throw new Error(`Not a directory: ${rel}`);
+  }
+  return target;
+}
+
+function ensureDirs(root: string, rel: string): string {
+  const target = safePath(root, rel);
+  let current = root;
+  for (const part of relative(root, target).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    if (!statOrMissing(current)) mkdirSync(current, { mode: 0o700 });
+    safePath(root, relative(root, current));
+    if (!lstatSync(current).isDirectory()) throw new Error("Artifact parent is not a directory");
+  }
+  return target;
+}
+
+/** Bounded, no-follow read. Check the opened descriptor, not just a preceding stat. */
+function readBounded(root: string, rel: string, max = MAX_REPORT): string {
+  const path = safePath(root, rel);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    // Read at most max+1 bytes even if the file grows after opening.
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > max) throw new Error(`Not a regular file or exceeds size limit: ${rel}`);
+    const buffer = Buffer.alloc(Math.min(max + 1, st.size + 1));
+    let size = 0;
+    while (size < buffer.length) {
+      const n = readSync(fd, buffer, size, buffer.length - size, null);
+      if (!n) break;
+      size += n;
     }
-    return;
-  }
-  logDiagnostic(`[${level}] ${msg}`);
+    if (size > max || size > st.size) throw new Error(`File grew while reading: ${rel}`);
+    const after = fstatSync(fd);
+    if (after.size !== st.size || after.mtimeMs !== st.mtimeMs || after.ctimeMs !== st.ctimeMs) throw new Error(`File changed while reading: ${rel}`);
+    return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size));
+  } finally { closeSync(fd); }
 }
 
-function loadConfig(): VordtConfig {
+export function checkScope(root: string) {
+  const canonical = canonicalRoot(root);
+  if (canonical !== root) throw new Error("Root must be canonical; select it again with /vordt-root");
+  const content = readBounded(root, "SCOPE.md", MAX_SCOPE);
+  if (!content.trim()) throw new Error("SCOPE.md is empty or whitespace-only");
+  return { content, sha256: hash(content) };
+}
+
+export function utcRunId(): string {
+  return `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
+}
+function safeId(id: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(id)) throw new Error("Invalid run ID: use letters, digits, underscores or hyphens");
+  return id;
+}
+function assertOption(option: string): asserts option is Option {
+  if (!(OPTIONS as readonly string[]).includes(option)) throw new Error("Unknown pipeline option");
+}
+
+/** Same-directory temp + fsync + link gives atomic, exclusive publication; rename
+ * replaces only private state while holding its lock. Never overwrite evidence.
+ */
+function publish(root: string, rel: string, text: string, replace = false) {
+  const target = safePath(root, rel);
+  const parent = relative(root, dirname(target)) || ".";
+  ensureDirs(root, parent);
+  const tempRel = `${parent}/.vordt-tmp-${randomUUID()}`;
+  const temp = safePath(root, tempRel);
+  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try {
-    const raw = readFileSync(CONFIG_FILE, "utf8");
-    const p = JSON.parse(raw) as { roots?: Record<string, string>; root?: unknown };
-    const roots: Record<string, string> =
-      p && typeof p === "object" && typeof p.roots === "object" && p.roots
-        ? { ...p.roots }
-        : {};
-    // Migrate the old single-root layout to the default session once.
-    if (typeof p?.root === "string" && p.root.length > 0 && !roots[DEFAULT_SESSION]) {
-      roots[DEFAULT_SESSION] = p.root;
+    try { writeFileSync(fd, text, "utf8"); fsyncSync(fd); } finally { closeSync(fd); }
+    safePath(root, rel);
+    if (replace) renameSync(temp, target);
+    else linkSync(temp, target); // EEXIST includes dangling symlinks
+  } finally { if (statOrMissing(temp)) unlinkSync(temp); }
+}
+function lock<T>(root: string, rel: string, fn: () => T): T {
+  const path = safePath(root, rel);
+  ensureDirs(root, relative(root, dirname(path)) || ".");
+  try { mkdirSync(path, { mode: 0o700 }); } catch (error) {
+    if (code(error) === "EEXIST") throw new Error(`Bookkeeping is locked (${rel}). Retry; inspect abandoned locks manually after a crash.`);
+    throw error;
+  }
+  try { return fn(); } finally { rmdirSync(path); }
+}
+
+export const HEADER_FIELDS = [
+  "Run ID / UTC date", "Project root", "Source revision", "Working tree", "Scope", "Focus",
+  "Upstream reports consumed", "Coverage", "Reviewed areas", "Excluded/unreviewed areas", "Limitations", "Summary",
+];
+export const HANDOFF_FIELDS = ["Key facts and stable IDs", "Evidence locations", "Unresolved questions", "Recommended next actions"];
+const PASS_SECTIONS: Record<Option, string[]> = {
+  "scan-structure": ["Architecture and normal behavior", "Coverage inventory", "Function inventory"],
+  "scan-surface": ["Surface coverage", "Input points"],
+  "scan-vulns": ["Triage summary", "Candidate findings", "Rejected candidates"],
+  exploit: ["Attempt summary", "Attempts"],
+  report: ["Executive summary", "Findings", "Remediation summary", "Appendix"],
+};
+function fields(text: string) {
+  const result = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:-\s+)?\*\*([^*]+):\*\*\s*(.*)$/);
+    if (m) {
+      if (result.has(m[1])) throw new Error(`Duplicate report field: ${m[1]}`);
+      result.set(m[1], m[2].trim());
     }
-    return { roots };
-  } catch {
-    return { roots: {} };
   }
+  return result;
 }
-
-/** Atomically persist the config (write temp, then rename). */
-function saveConfig(cfg: VordtConfig): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  const tmp = `${CONFIG_FILE}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ roots: cfg.roots }, null, 2) + "\n", "utf8");
-  renameSync(tmp, CONFIG_FILE);
-}
-
-function sessionKey(ctx: { sessionManager?: { getSessionId?: () => string | undefined } }): string {
-  return ctx.sessionManager?.getSessionId?.() ?? DEFAULT_SESSION;
-}
-
-function rootForSession(ctx: { sessionManager?: { getSessionId?: () => string | undefined } }): string | null {
-  return loadConfig().roots[sessionKey(ctx)] ?? null;
-}
-
-function setRootForSession(ctx: { sessionManager?: { getSessionId?: () => string | undefined } }, root: string): void {
-  const cfg = loadConfig();
-  cfg.roots[sessionKey(ctx)] = root;
-  saveConfig(cfg); // throws on failure so state is only updated on success
-}
-
-function clearRootForSession(ctx: { sessionManager?: { getSessionId?: () => string | undefined } }): void {
-  const cfg = loadConfig();
-  delete cfg.roots[sessionKey(ctx)];
-  saveConfig(cfg);
-}
-
-// ---------------------------------------------------------------------------
-// Scope validation (single source of truth for the gate, /vordt-root, and display)
-// ---------------------------------------------------------------------------
-
-interface ScopeCheck {
-  ok: boolean;
-  reason?: string;
-  content?: string;
-  sha256?: string;
-}
-
-function checkScope(root: string): ScopeCheck {
-  let st;
-  try {
-    st = lstatSync(root);
-  } catch {
-    return { ok: false, reason: `Project root is not readable: ${root}` };
+const placeholder = (s: string) => !s || /^<.*>$/.test(s) || /^(?:TODO|TBD|\.\.\.)$/i.test(s);
+export function validateReport(root: string, option: string): string[] {
+  assertOption(option);
+  const text = readBounded(root, `${option}/report.md`);
+  const issues: string[] = [];
+  // Fenced examples must not satisfy real report structure.
+  const body = text.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, "");
+  if (!body.startsWith(`# ${option} report\n`) && !body.startsWith(`# ${option} report\r\n`)) issues.push("Missing canonical report title");
+  const firstSection = body.search(/^## /m);
+  const header = fields(firstSection < 0 ? body : body.slice(0, firstSection));
+  for (const name of HEADER_FIELDS) if (placeholder(header.get(name) ?? "")) issues.push(`Missing or empty header: ${name}`);
+  if (!/^(complete|partial|blocked)$/.test(header.get("Coverage") ?? "")) issues.push("Invalid Coverage (complete | partial | blocked)");
+  if (header.has("Project root") && header.get("Project root") !== root) issues.push("Project root does not match session root");
+  const runId = header.get("Run ID / UTC date");
+  if (runId) { try { safeId(runId); } catch { issues.push("Invalid run ID"); } }
+  if (!/SCOPE\.md.*SHA-256\s+[a-f0-9]{64}\b/i.test(header.get("Scope") ?? "")) issues.push("Missing scope SHA-256");
+  else if (!header.get("Scope")!.includes(checkScope(root).sha256)) issues.push("Scope digest does not match current SCOPE.md");
+  const required = header.get("Coverage") === "blocked" ? [] : PASS_SECTIONS[option];
+  for (const section of [...required, "Source manifest", "Handoff"]) {
+    const lines = body.split(/\r?\n/);
+    const indices = lines.flatMap((line, i) => line === `## ${section}` ? [i] : []);
+    if (indices.length !== 1) { issues.push(`Expected exactly one ## ${section}`); continue; }
+    const start = indices[0] + 1;
+    const next = lines.findIndex((line, i) => i >= start && /^## /.test(line));
+    const sectionBody = lines.slice(start, next < 0 ? undefined : next).join("\n").trim();
+    if (placeholder(sectionBody)) issues.push(`Empty or placeholder section: ${section}`);
+    if (section === "Handoff") {
+      const handoff = fields(sectionBody);
+      for (const name of HANDOFF_FIELDS) if (placeholder(handoff.get(name) ?? "")) issues.push(`Missing handoff field: ${name}`);
+      if (next >= 0) issues.push("Handoff must be the final section");
+    }
   }
-  if (st.isSymbolicLink() || !st.isDirectory()) {
-    return { ok: false, reason: `Not a real directory: ${root}` };
-  }
-
-  const scopePath = join(root, SCOPE_FILE);
-  let sst;
-  try {
-    sst = lstatSync(scopePath);
-  } catch {
-    return { ok: false, reason: `${SCOPE_FILE} not found in ${root}` };
-  }
-  if (sst.isSymbolicLink()) return { ok: false, reason: `${SCOPE_FILE} must be a regular file, not a symlink` };
-  if (!sst.isFile()) return { ok: false, reason: `${SCOPE_FILE} is not a regular file` };
-  if (sst.size === 0) return { ok: false, reason: `${SCOPE_FILE} is empty` };
-  if (sst.size > MAX_SCOPE_BYTES) {
-    return { ok: false, reason: `${SCOPE_FILE} exceeds the ${Math.round(MAX_SCOPE_BYTES / 1024)} KiB limit` };
-  }
-
-  let content: string;
-  try {
-    content = readFileSync(scopePath, "utf8");
-  } catch {
-    return { ok: false, reason: `Could not read ${scopePath}` };
-  }
-  if (!content.trim()) return { ok: false, reason: `${SCOPE_FILE} contains only whitespace` };
-
-  return { ok: true, content, sha256: sha256(content) };
+  return issues;
 }
 
-function scopeStatusText(root: string | null): string {
-  if (!root) return `${APP_NAME} ⎈ no project root for this session — /vordt-root <dir>`;
-  const check = checkScope(root);
-  return `${APP_NAME} ⎈ ${displayPath(root)}${check.ok ? "" : `  ⚠ missing/invalid SCOPE.md`}`;
+export function archiveReport(root: string, option: string) {
+  assertOption(option);
+  return lock(root, `.vordt/${option}-archive.lock`, () => {
+    const rel = `${option}/report.md`;
+    if (!statOrMissing(safePath(root, rel))) return { archived: false, reason: "No previous report" };
+    const text = readBounded(root, rel);
+    const headerText = text.split(/^## /m)[0];
+    const id = fields(headerText).get("Run ID / UTC date");
+    // Legacy reports get a unique ID. Invalid supplied IDs are rejected, not interpreted as paths.
+    const previousRunId = id ? safeId(id) : utcRunId();
+    let destination = `${option}/history/${previousRunId}/report.md`;
+    if (statOrMissing(safePath(root, destination))) destination = `${option}/history/${previousRunId}-${randomUUID()}/report.md`;
+    publish(root, destination, text);
+    // Do not remove a newer canonical report written by another actor in the meantime.
+    if (readBounded(root, rel) !== text) throw new Error("Report changed during archive; both copies preserved");
+    unlinkSync(safePath(root, rel));
+    return { archived: true, previousRunId, destination };
+  });
 }
 
-function displayPath(p: string): string {
-  const home = process.env.HOME || process.env.USERPROFILE;
-  if (home) {
-    const rel = relative(home, p);
-    const insideHome = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-    if (insideHome) return rel === "" ? "~" : `~/${rel}`;
+interface Registry { format: 1; max: Record<Family, number>; entries: Record<string, string>; }
+/** Fail closed on unreadable history, unsafe paths and malformed IDs. No silent limits. */
+function historicalIds(root: string) {
+  const max = { FUNC: 0, INPUT: 0, VORDT: 0 };
+  const ids = new Set<string>();
+  const scan = (rel: string) => {
+    const path = safePath(root, rel);
+    const st = statOrMissing(path);
+    if (!st) return;
+    const text = readBounded(root, rel);
+    for (const m of text.matchAll(/\b(FUNC|INPUT|VORDT)-(\d+)\b/g)) {
+      const n = Number(m[2]);
+      if (!Number.isSafeInteger(n)) throw new Error("Unsafe numeric ID in report history");
+      const family = m[1] as Family;
+      max[family] = Math.max(max[family], n);
+      ids.add(`${family}-${String(n).padStart(3, "0")}`);
+    }
+  };
+  // Synchronous scan only at migration/bootstrap. All future allocations use the registry.
+  for (const option of OPTIONS) {
+    scan(`${option}/report.md`);
+    const histRel = `${option}/history`;
+    const hist = safePath(root, histRel);
+    if (!statOrMissing(hist)) continue;
+    // A history directory contains only run directories; refuse ambiguous content.
+    for (const entry of readdirSync(hist, { withFileTypes: true })) {
+      if (!entry.isDirectory()) throw new Error(`Unexpected history entry: ${histRel}/${entry.name}`);
+      scan(`${histRel}/${entry.name}/report.md`);
+    }
   }
-  return p;
+  return { max, ids };
 }
 
-// ---------------------------------------------------------------------------
-// Manifest / archive / id helpers (shared by the registered tools)
-// ---------------------------------------------------------------------------
-
-function utcRunId(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return (
-    `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
-    `-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
-  );
+export function reserveId(root: string, family: Family, identity: string, existingId?: string) {
+  if (!["FUNC", "INPUT", "VORDT"].includes(family)) throw new Error("Invalid ID family");
+  if (!identity.trim() || identity.length > 2000) throw new Error("Provide a stable, non-secret source identity (1–2000 characters)");
+  const key = `${family}:${hash(identity)}`;
+  return lock(root, ".vordt/ids.lock", () => {
+    let registry: Registry;
+    const rel = ".vordt/ids.json";
+    if (statOrMissing(safePath(root, rel))) {
+      registry = JSON.parse(readBounded(root, rel));
+      if (registry.format !== 1 || !registry.max || !registry.entries || typeof registry.entries !== "object" || Array.isArray(registry.entries)) throw new Error("Invalid ID registry");
+      for (const f of ["FUNC", "INPUT", "VORDT"] as Family[]) {
+        if (!Number.isSafeInteger(registry.max[f]) || registry.max[f] < 0) throw new Error("Invalid ID counter");
+      }
+      const seen = new Set<string>();
+      for (const [k, v] of Object.entries(registry.entries)) {
+        const m = typeof v === "string" && v.match(/^(FUNC|INPUT|VORDT)-(\d+)$/);
+        if (!m || !Number.isSafeInteger(Number(m[2])) || Number(m[2]) < 1 || v !== `${m[1]}-${String(Number(m[2])).padStart(3, "0")}` || !k.startsWith(`${m[1]}:`) || !/^(FUNC|INPUT|VORDT):[a-f0-9]{64}$/.test(k) || seen.has(v) || Number(m[2]) > registry.max[m[1] as Family]) throw new Error("Invalid ID registry entry");
+        seen.add(v);
+      }
+    } else registry = { format: 1, max: historicalIds(root).max, entries: {} };
+    const previous = registry.entries[key];
+    if (previous) {
+      if (existingId && existingId !== previous) throw new Error("Identity already reserved with a different ID");
+      return { id: previous, reused: true };
+    }
+    if (existingId) {
+      const m = existingId.match(new RegExp(`^${family}-(\\d+)$`));
+      if (!m || !Number.isSafeInteger(Number(m[1])) || Number(m[1]) < 1) throw new Error("Invalid existing ID");
+      // Adoption is explicit after source-identity review; require historical backing.
+      if (!historicalIds(root).ids.has(existingId)) throw new Error("Existing ID has no historical backing (use canonical zero-padding)");
+      if (Object.values(registry.entries).includes(existingId)) throw new Error("Existing ID belongs to another identity");
+    }
+    const n = existingId ? Number(existingId.split("-")[1]) : registry.max[family] + 1;
+    if (!Number.isSafeInteger(n)) throw new Error("ID counter exhausted");
+    const id = existingId ?? `${family}-${String(n).padStart(3, "0")}`;
+    registry.max[family] = Math.max(registry.max[family], n);
+    registry.entries[key] = id;
+    publish(root, rel, JSON.stringify(registry, null, 2) + "\n", true);
+    return { id, reused: !!existingId };
+  });
 }
 
-/** Options currently under the project root whose artifacts are generated by Vordt. */
-function isVordtArtifact(root: string, absPath: string): boolean {
-  const relP = relative(root, absPath);
-  if (!relP || relP.startsWith("..") || isAbsolute(relP)) return true;
-  const parts = relP.split(/[\\/]/);
-  const top = parts[0];
-  if (top === ".git" || top === "node_modules" || top === ".vordt") return true;
-  if (VORDT_SKILLS_SET.has(top)) {
-    // Exclude known generated Vordt artifacts under an option dir.
-    if (parts.length === 2 && (parts[1] === "report.md" || parts[1] === "history" || parts[1] === "poc")) return true;
-    if (parts[1] === "history" || parts[1] === "poc") return true;
-  }
-  return false;
+interface InventoryOptions {
+  paths: string[];
+  exclusions?: string[];
+  maxFiles?: number;
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
 }
-
-function buildInventory(root: string): {
-  runId: string;
-  files: { path: string; sha256: string; bytes: number }[];
-  gitCommit: string | null;
-  dirty: string[] | null;
-  manifestPath: string;
-} {
+/** Inventory is not a review manifest. The agent must select paths from accepted scope.
+ * It never interprets Markdown scope semantically or treats hashing as analysis.
+ */
+export async function buildInventory(root: string, options: InventoryOptions, signal?: AbortSignal) {
+  const scope = checkScope(root);
+  if (!options.paths?.length) throw new Error("Explicit approved coverage paths are required");
+  const normalize = (p: string) => relative(root, safePath(root, p)).split(sep).join("/") || ".";
+  const paths = [...new Set(options.paths.map(normalize))].sort();
+  const exclusions = [...new Set((options.exclusions ?? []).map(normalize))].sort();
+  const limits = {
+    files: options.maxFiles ?? 8000,
+    fileBytes: options.maxFileBytes ?? 64 * 1024 * 1024,
+    totalBytes: options.maxTotalBytes ?? 512 * 1024 * 1024,
+  };
+  for (const n of Object.values(limits)) if (!Number.isSafeInteger(n) || n < 1) throw new Error("Invalid inventory limit");
   const runId = utcRunId();
   const files: { path: string; sha256: string; bytes: number }[] = [];
-
-  const walk = (dir: string): void => {
-    if (files.length >= MAX_MANIFEST_FILES) return;
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
+  const skipped: { path: string; reason: string }[] = [];
+  const errors: { path: string; reason: string }[] = [];
+  const visited = new Set<string>();
+  let bytes = 0, entries = 0, truncated = false;
+  const under = (p: string, prefix: string) => prefix === "." || p === prefix || p.startsWith(`${prefix}/`);
+  const generated = (rel: string) => {
+    if (under(rel, ".vordt")) return true;
+    if (/^(scan-structure|scan-surface|scan-vulns|exploit|report)\/(?:history\/[^/]+\/)?report\.md$/.test(rel)) {
+      const option = rel.split("/")[0];
+      if (!statOrMissing(safePath(root, rel))) return false;
+      return readBounded(root, rel).startsWith(`# ${option} report\n`);
     }
-    for (const ent of entries) {
-      if (files.length >= MAX_MANIFEST_FILES) break;
-      const abs = join(dir, ent.name);
-      if (isVordtArtifact(root, abs)) continue;
-      if (ent.isDirectory()) {
-        walk(abs);
-      } else if (ent.isFile()) {
-        try {
-          const buf = readFileSync(abs);
-          files.push({
-            path: relative(root, abs).split(/[\\/]/).join("/"),
-            sha256: createHash("sha256").update(buf).digest("hex"),
-            bytes: buf.length,
-          });
-        } catch {
-          /* skip unreadable */
+    return false;
+  };
+  const walk = async (rel: string): Promise<void> => {
+    signal?.throwIfAborted();
+    if (visited.has(rel) || truncated) return;
+    visited.add(rel);
+    if (++entries > 100000) { truncated = true; errors.push({ path: rel, reason: "Traversal entry limit reached" }); return; }
+    if (rel.split("/").includes(".git") || under(rel, ".vordt") || exclusions.some(x => under(rel, x))) {
+      skipped.push({ path: rel, reason: "Explicit exclusion or reserved metadata" }); return;
+    }
+    try {
+      const path = safePath(root, rel);
+      const st = lstatSync(path);
+      if (st.isDirectory()) {
+        for (const entry of (await readdir(path)).sort()) {
+          await walk(rel === "." ? entry : `${rel}/${entry}`);
+          if (truncated) break;
         }
+        return;
       }
+      if (!st.isFile()) { skipped.push({ path: rel, reason: "Non-regular file" }); return; }
+      if (generated(rel)) { skipped.push({ path: rel, reason: "Recognized Vordt report" }); return; }
+      if (files.length >= limits.files || bytes >= limits.totalBytes) {
+        truncated = true; errors.push({ path: rel, reason: "Inventory file/total-byte limit reached" }); return;
+      }
+      if (st.size > limits.fileBytes) { errors.push({ path: rel, reason: "File exceeds hash size limit" }); return; }
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const before = await handle.stat();
+        if (!before.isFile()) throw new Error("File type changed");
+        const digest = createHash("sha256");
+        const buffer = Buffer.alloc(64 * 1024);
+        let size = 0;
+        while (true) {
+          signal?.throwIfAborted();
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+          if (!bytesRead) break;
+          size += bytesRead;
+          bytes += bytesRead;
+          if (size > limits.fileBytes || bytes > limits.totalBytes) throw new Error("Streaming hash byte limit reached");
+          digest.update(buffer.subarray(0, bytesRead));
+        }
+        const after = await handle.stat();
+        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || size !== after.size) throw new Error("File changed while hashing");
+        files.push({ path: rel, sha256: digest.digest("hex"), bytes: size });
+      } finally { await handle.close(); }
+    } catch (error) {
+      signal?.throwIfAborted();
+      errors.push({ path: rel, reason: errorText(error) });
     }
   };
-  walk(root);
-
+  for (const path of paths) await walk(path);
+  signal?.throwIfAborted();
+  const git = async (args: string[]) => (await exec("git", ["-c", "core.fsmonitor=false", "-c", "status.relativePaths=true", "-C", root, ...args], {
+    encoding: "utf8", signal, timeout: 10000, maxBuffer: 4 * 1024 * 1024,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+  })).stdout;
   let gitCommit: string | null = null;
   let dirty: string[] | null = null;
-  // stdio: ['ignore','pipe','ignore'] keeps git's stderr out of the parent's
-  // terminal on probes of non-git targets (e.g. "fatal: not a git repository").
+  const gitErrors: string[] = [];
   try {
-    gitCommit =
-      execFileSync("git", ["-C", root, "rev-parse", "--short", "HEAD"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim() || null;
-  } catch {
-    gitCommit = null;
+    gitCommit = (await git(["rev-parse", "HEAD"])).trim();
+    const tokens = (await git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", "."])).split("\0").filter(Boolean);
+    dirty = tokens.filter(line => !generated(line.slice(3))).map(line => line);
+  } catch (error) {
+    signal?.throwIfAborted();
+    gitErrors.push(errorText(error).slice(0, 1000));
   }
-  if (gitCommit) {
-    try {
-      dirty = execFileSync("git", ["-C", root, "status", "--porcelain"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean);
-    } catch {
-      dirty = null;
-    }
-  }
-
+  if (checkScope(root).sha256 !== scope.sha256) throw new Error("Scope changed during inventory; invoke the skill again");
+  signal?.throwIfAborted();
   const manifest = {
-    format: 1,
-    runId,
-    createdAt: new Date().toISOString(),
-    root,
-    gitCommit,
-    dirty: dirty ?? undefined,
-    scope: (() => {
-      const c = checkScope(root);
-      return c.ok ? { sha256: c.sha256 } : { sha256: null };
-    })(),
-    files,
+    format: 2, runId, createdAt: new Date().toISOString(), root, scope: { sha256: scope.sha256 },
+    paths, exclusions, limits, gitCommit, dirty, gitErrors, files, skipped, errors, truncated,
+    coverage: errors.length || truncated ? "partial" : "complete",
+    purpose: "Content inventory only; not evidence of source review. Snapshot is best-effort, not filesystem-transactional.",
   };
-
-  const manifestPath = join(root, ".vordt", "manifests", `${runId}.json`);
-  mkdirSync(join(root, ".vordt", "manifests"), { recursive: true });
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
-
-  return { runId, files, gitCommit, dirty, manifestPath };
+  const manifestRel = `.vordt/manifests/${runId}.json`;
+  publish(root, manifestRel, JSON.stringify(manifest, null, 2) + "\n");
+  return { ...manifest, manifestPath: manifestRel };
 }
 
-function highestId(root: string, option: string, type: "FUNC" | "INPUT" | "VORDT"): {
-  max: number;
-  matches: number;
-  filesScanned: number;
-} {
-  const pattern = new RegExp(`\\b(${type})-([0-9]+)\\b`, "g");
-  let max = 0;
-  let matches = 0;
-  let filesScanned = 0;
-
-  const scanFile = (file: string): void => {
-    filesScanned++;
-    let text: string;
+interface RootConfig { format: 2; session: string; cwd: string; root: string | null; }
+/** Per-session files avoid global read/modify/write races. Same-session writes are locked. */
+export default function vordt(pi: ExtensionAPI) {
+  const configDir = resolve(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
+  const stateRoot = () => {
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    return canonicalRoot(configDir);
+  };
+  const session = (ctx: ExtensionContext) => {
+    const id = ctx.sessionManager.getSessionId();
+    if (typeof id !== "string" || !id) throw new Error("No Pi session identity available");
+    return { id, cwd: realpathSync(ctx.cwd) };
+  };
+  const sessionFile = (ctx: ExtensionContext) => {
+    const s = session(ctx);
+    return `vordt/sessions/${hash(JSON.stringify([s.id, s.cwd]))}.json`;
+  };
+  const selectedRoot = (ctx: ExtensionContext): string | null => {
+    const rel = sessionFile(ctx);
+    const base = stateRoot();
+    if (!statOrMissing(safePath(base, rel))) return null; // Never inherit legacy global roots.
+    const data: RootConfig = JSON.parse(readBounded(base, rel, 16 * 1024));
+    const s = session(ctx);
+    if (data.format !== 2 || data.session !== s.id || data.cwd !== s.cwd || !(data.root === null || typeof data.root === "string" && isAbsolute(data.root))) throw new Error("Invalid session-root configuration");
+    return data.root;
+  };
+  const requireRoot = (ctx: ExtensionContext, supplied?: string) => {
+    const root = selectedRoot(ctx);
+    if (!root) throw new Error("No Vordt root for this session. Run /vordt-root <dir> first.");
+    checkScope(root);
+    if (supplied !== undefined && canonicalRoot(supplied) !== root) throw new Error("Tool root must match the selected session root");
+    return root;
+  };
+  const diagnostic = (ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "error") => {
+    if (ctx.hasUI) ctx.ui.notify(message, level);
+    else {
+      // A real custom message reaches print/JSON consumers; stderr also makes blocking visible.
+      pi.sendMessage({ customType: "vordt-diagnostic", content: message, display: true, details: { level } }, { triggerTurn: false });
+      process.stderr.write(`Vordt [${level}]: ${message.replace(/[\r\n]/g, " ")}\n`);
+    }
+  };
+  const updateStatus = (ctx: ExtensionContext) => {
     try {
-      text = readFileSync(file, "utf8");
-    } catch {
-      return;
-    }
-    let m: RegExpExecArray | null;
-    while ((m = pattern.exec(text)) !== null) {
-      matches++;
-      const n = parseInt(m[2], 10);
-      if (n > max) max = n;
+      const root = selectedRoot(ctx);
+      if (root) checkScope(root);
+      if (ctx.hasUI) ctx.ui.setStatus("vordt-root", `Vordt ⎈ ${root ?? "no root — /vordt-root <dir>"}`);
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.setStatus("vordt-root", "Vordt ⚠ invalid root / SCOPE.md");
+      diagnostic(ctx, errorText(error));
     }
   };
-
-  const base = join(root, option);
-  const report = join(base, "report.md");
-  if (existsSync(report)) scanFile(report);
-
-  const hist = join(base, "history");
-  try {
-    for (const run of readdirSync(hist)) {
-      if (filesScanned > 2000) break;
-      const h = join(hist, run, "report.md");
-      if (existsSync(h)) scanFile(h);
-    }
-  } catch {
-    /* no history */
-  }
-
-  return { max, matches, filesScanned };
-}
-
-function archiveReport(root: string, option: string, runId?: string): {
-  ok: boolean;
-  archived: boolean;
-  destination?: string;
-  reason?: string;
-} {
-  if (!VORDT_SKILLS_SET.has(option)) {
-    return { ok: false, archived: false, reason: `Unknown option: ${option}` };
-  }
-  const report = join(root, option, "report.md");
-  if (!existsSync(report)) {
-    return { ok: false, archived: false, reason: `No existing report at ${relative(root, report)}` };
-  }
-  const id = runId ?? utcRunId();
-  let dir = join(root, option, "history", id);
-  let target = join(dir, "report.md");
-  let n = 0;
-  while (existsSync(target)) {
-    n++;
-    dir = join(root, option, "history", `${id}-${n}`);
-    target = join(dir, "report.md");
-  }
-  mkdirSync(dir, { recursive: true });
-  renameSync(report, target);
-  return { ok: true, archived: true, destination: relative(root, target) };
-}
-
-function validateReport(root: string, option: string): string[] {
-  const report = join(root, option, "report.md");
-  if (!existsSync(report)) {
-    return [`${option}/report.md does not exist`];
-  }
-  let text: string;
-  try {
-    text = readFileSync(report, "utf8");
-  } catch {
-    return [`${option}/report.md is not readable`];
-  }
-  const required = [
-    "Run ID / UTC date",
-    "Project root",
-    "Coverage:",
-    "## Handoff",
-  ];
-  if (option !== "report") {
-    required.push("## Source manifest");
-  }
-  return required.filter((marker) => !text.includes(marker))
-    .map((m) => `Missing expected marker: ${m}`);
-}
-
-// ---------------------------------------------------------------------------
-// Extension body
-// ---------------------------------------------------------------------------
-
-export default function (pi: ExtensionAPI) {
-  pi.on("session_start", async (_event, ctx) => {
-    currentRoot = rootForSession(ctx);
-    // If a persisted root for this session is now invalid, surface it loudly.
-    if (currentRoot) {
-      const check = checkScope(currentRoot);
-      if (!check.ok) {
-        notify(ctx, `${APP_NAME}: persisted root invalid for this session — ${check.reason}`, "warning");
-      }
-    }
-    if (ctx.hasUI) ctx.ui.setStatus("vordt-root", scopeStatusText(currentRoot));
-  });
-
-  // --- /vordt-root command -------------------------------------------------
+  pi.on("session_start", async (_event, ctx) => updateStatus(ctx));
   pi.registerCommand("vordt-root", {
-    description: `Set/clear the ${APP_NAME} project root for this session (a directory containing ${SCOPE_FILE})`,
-    getArgumentCompletions: (prefix: string) => {
-      // Directory completion is handled by pi's built-in path autocomplete after the space.
-      return null;
-    },
+    description: "Set the session root; no arguments shows it; clear/none removes it",
     handler: async (args, ctx) => {
-      const input = (args ?? "").trim();
-      const key = sessionKey(ctx);
-
-      if (input === "clear" || input === "none" || input === "") {
-        const current = currentRoot ?? rootForSession(ctx);
-        if (input === "" && current) {
-          notify(ctx, `Current ${APP_NAME} root for this session: ${current}`, "info");
-          return;
-        }
-        if (current) {
-          try {
-            clearRootForSession(ctx);
-          } catch {
-            notify(ctx, `Failed to clear ${APP_NAME} root for session ${key} — see log.`, "error");
-            return;
-          }
-          currentRoot = null;
-          if (ctx.hasUI) ctx.ui.setStatus("vordt-root", scopeStatusText(null));
-          notify(ctx, `${APP_NAME} root cleared for this session.`, "info");
-        }
-        return;
-      }
-
-      const expanded =
-        input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input;
-      const abs = resolve(ctx.cwd, expanded);
-
-      const check = checkScope(abs);
-      if (!check.ok) {
-        notify(ctx, check.reason ?? "unknown reason", "error");
-        return;
-      }
-
-      if (ctx.isIdle && !ctx.isIdle()) {
-        notify(ctx, `${APP_NAME} root is locked while a run is in progress. Try again when idle.`, "warning");
-        return;
-      }
-
       try {
-        setRootForSession(ctx, abs); // persists before we commit the in-memory change
-      } catch {
-        notify(ctx, `Could not persist ${APP_NAME} root (${abs}). No change was made.`, "error");
-        return;
-      }
-      currentRoot = abs;
-      if (ctx.hasUI) {
-        ctx.ui.setStatus("vordt-root", scopeStatusText(abs));
-        ctx.ui.notify(`${APP_NAME} root set for this session: ${abs}`, "info");
-      }
+        const input = args.trim();
+        if (!input) { diagnostic(ctx, `Vordt root: ${selectedRoot(ctx) ?? "none — use /vordt-root <dir>"}`, "info"); return; }
+        if (!ctx.isIdle()) throw new Error("Root is locked while a run is in progress");
+        const root = ["clear", "none"].includes(input) ? null : canonicalRoot(resolve(ctx.cwd,
+          input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input));
+        if (root) checkScope(root);
+        const s = session(ctx);
+        const base = stateRoot();
+        const rel = sessionFile(ctx);
+        lock(base, `${rel}.lock`, () => publish(base, rel, JSON.stringify({ format: 2, session: s.id, cwd: s.cwd, root }) + "\n", true));
+        updateStatus(ctx);
+        diagnostic(ctx, root ? `Vordt root set: ${root}` : "Vordt root cleared", "info");
+      } catch (error) { diagnostic(ctx, errorText(error)); }
     },
   });
-
-  // --- Gate + scope injection for Vordt skill invocations ------------------
   pi.on("input", async (event, ctx) => {
-    // Extension commands are checked before this handler, so only skill/text reaches us here.
-    const match = event.text.match(/^\/skill:([^\s]+)/);
-    if (!match) return { action: "continue" };
-    const skill = match[1];
-    if (!VORDT_SKILLS_SET.has(skill)) return { action: "continue" }; // not a Vordt skill
-
-    const root = rootForSession(ctx) ?? currentRoot;
-    currentRoot = root;
-
-    if (!root) {
-      notify(
-        ctx,
-        `No ${APP_NAME} project root set for this session. Run /vordt-root <dir> (with ${SCOPE_FILE} inside) first.`,
-        "error",
-      );
-      return { action: "handled" };
-    }
-
-    const check = checkScope(root);
-    if (!check.ok) {
-      if (ctx.hasUI) ctx.ui.setStatus("vordt-root", scopeStatusText(root));
-      notify(ctx, check.reason ?? "unknown reason", "error");
-      return { action: "handled" };
-    }
-
-    // A literal space after the skill name keeps pi's /skill: parser from swallowing
-    // the injected block as part of the skill name (it splits on the first space).
-    const injected =
-      `${event.text} <VORDT_SCOPE>` +
-      `\nproject-root: ${root}` +
-      `\nscope-file: ${join(root, SCOPE_FILE)}` +
-      `\nscope-sha256: ${check.sha256}` +
-      `\n\n${check.content}\n` +
-      `</VORDT_SCOPE>`;
-
-    return { action: "transform", text: injected };
+    const match = event.text.match(/^\/skill:([^\s]+)([\s\S]*)$/);
+    if (!match || !(OPTIONS as readonly string[]).includes(match[1])) return { action: "continue" };
+    try {
+      const root = requireRoot(ctx);
+      const scope = checkScope(root);
+      const focus = match[2].trim();
+      if (/<\/?VORDT_SCOPE\b/.test(focus + scope.content)) throw new Error("Ambiguous VORDT_SCOPE delimiter in focus or scope");
+      updateStatus(ctx);
+      return { action: "transform", text: `/skill:${match[1]} ${focus}\n\n<VORDT_SCOPE>\nproject-root: ${root}\nscope-file: ${join(root, "SCOPE.md")}\nscope-sha256: ${scope.sha256}\n\n${scope.content}\n</VORDT_SCOPE>` };
+    } catch (error) { diagnostic(ctx, errorText(error)); return { action: "handled" }; }
   });
 
-  // --- Deterministic helpers (callable directly by the pipeline) ----------
-  const rootParam = Type.Optional(Type.String({ description: "Project root. Defaults to the current Vordt root." }));
-
+  // Retain the optional root parameter for old callers, but never use it to select a target.
+  const rootParam = Type.Optional(Type.String({ description: "Optional compatibility check; must match the session root" }));
+  const result = (details: unknown, text: string) => ({ content: [{ type: "text" as const, text }], details });
   pi.registerTool({
-    name: "vordt_ids",
-    label: "Vordt: highest allocated ID",
-    description:
-      "Return the highest already-allocated FUNC/INPUT/VORDT numeric id for an option, across report.md and history/.",
-    promptSnippet: "Ask vordt_ids for the next free FUNC/INPUT/VORDT id before assigning one.",
-    promptGuidelines: [
-      "Use vordt_ids before assigning a new FUNC-/, INPUT-/, or VORDT- id so stable IDs are never reused.",
-    ],
+    name: "vordt_ids", label: "Vordt: reserve stable ID", executionMode: "sequential",
+    description: "Atomically reserve/reuse a stable ID by family and non-secret source identity. Existing IDs may be explicitly adopted after source review. No manual IDs after registry bootstrap.",
+    parameters: Type.Object({ type: familySchema, identity: Type.String({ minLength: 1, maxLength: 2000 }), existingId: Type.Optional(Type.String()), root: rootParam }, { additionalProperties: false }),
+    async execute(_id, params, signal, _update, ctx) {
+      signal?.throwIfAborted();
+      const value = reserveId(requireRoot(ctx, params.root), params.type, params.identity, params.existingId);
+      return result(value, `${value.id} (${value.reused ? "reused" : "reserved"})`);
+    },
+  });
+  pi.registerTool({
+    name: "vordt_manifest", label: "Vordt: bounded content inventory", executionMode: "sequential",
+    description: "Hash explicit approved paths without executing source. Exclusions prune before reads. Records skipped paths/errors/limits. Hashing is not review. Output summary only; full JSON on disk.",
     parameters: Type.Object({
-      option: OPTION_ENUM,
-      type: ID_TYPE_ENUM,
+      paths: Type.Array(Type.String(), { minItems: 1, maxItems: 1000 }),
+      exclusions: Type.Optional(Type.Array(Type.String(), { maxItems: 1000 })),
+      maxFiles: Type.Optional(Type.Integer({ minimum: 1, maximum: 100000 })),
+      maxFileBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1024 * 1024 * 1024 })),
+      maxTotalBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 * 1024 * 1024 * 1024 })),
       root: rootParam,
-    }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const root = params.root ?? currentRoot;
-      if (!root) {
-        return { content: [{ type: "text", text: "No Vordt project root set. Run /vordt-root <dir> first." }], details: {} };
-      }
-      const c = checkScope(root);
-      if (!c.ok) {
-        return { content: [{ type: "text", text: `Invalid project root: ${c.reason ?? "unknown"}` }], details: { error: c.reason } };
-      }
-      const res = highestId(root, params.option, params.type);
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `Highest ${params.type} id in ${params.option}: ${res.max} ` +
-              `(${res.matches} matches across ${res.filesScanned} report files). ` +
-              `Next id: ${params.type}-${String(res.max + 1).padStart(3, "0")}.`,
-          },
-        ],
-        details: res,
-      };
+    }, { additionalProperties: false }),
+    async execute(_id, params, signal, _update, ctx) {
+      const value = await buildInventory(requireRoot(ctx, params.root), params, signal);
+      const details = { runId: value.runId, manifestPath: value.manifestPath, coverage: value.coverage, files: value.files.length, errors: value.errors.length, truncated: value.truncated };
+      return result(details, `${JSON.stringify(details)}\nInventory only, not evidence of review. See JSON for exclusions/errors and Git metadata.`);
     },
   });
-
   pi.registerTool({
-    name: "vordt_manifest",
-    label: "Vordt: source manifest snapshot",
-    description:
-      "Write a UTC run-id, git revision, dirty status, SCOPE digest, and per-file SHA-256 inventory to .vordt/manifests/<run-id>.json.",
-    promptSnippet: "Ask vordt_manifest for a run id and source snapshot at the start of a pass.",
-    promptGuidelines: [
-      "Ask vordt_manifest at the start of each pass to record the run id, git revision, SOURCE digest, and file inventory.",
-    ],
-    parameters: Type.Object({ root: rootParam }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const root = params.root ?? currentRoot;
-      if (!root) return { content: [{ type: "text", text: "No Vordt project root set. Run /vordt-root <dir> first." }], details: {} };
-      const c = checkScope(root);
-      if (!c.ok) return { content: [{ type: "text", text: `Invalid project root: ${c.reason ?? "unknown"}` }], details: { error: c.reason } };
-      const inv = buildInventory(root);
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `Run id: ${inv.runId}\n` +
-              `Git commit: ${inv.gitCommit ?? "non-git"}\n` +
-              `Dirty files: ${inv.dirty ? inv.dirty.length : "unknown"}\n` +
-              `Files hashed: ${inv.files.length}\n` +
-              `Manifest: ${relative(root, inv.manifestPath)}`,
-          },
-        ],
-        details: { runId: inv.runId, files: inv.files.length, manifestPath: inv.manifestPath },
-      };
+    name: "vordt_archive", label: "Vordt: preserve previous report", executionMode: "sequential",
+    description: "Archive the prior report under its own run ID (unique fallback for legacy reports), exclusively and without escaping the session root.",
+    parameters: Type.Object({ option: optionSchema, root: rootParam }, { additionalProperties: false }),
+    async execute(_id, params, signal, _update, ctx) {
+      signal?.throwIfAborted();
+      const value = archiveReport(requireRoot(ctx, params.root), params.option);
+      return result(value, JSON.stringify(value));
     },
   });
-
   pi.registerTool({
-    name: "vordt_archive",
-    label: "Vordt: archive a previous report",
-    description:
-      "Move <root>/<option>/report.md into <root>/<option>/history/<run-id>/report.md before writing a new one.",
-    promptSnippet: "Use vordt_archive to preserve a prior report before replacing it.",
-    promptGuidelines: [
-      "Use vordt_archive to preserve any existing report at <option>/report.md before writing a new one.",
-    ],
-    parameters: Type.Object({ option: OPTION_ENUM, root: rootParam, runId: Type.Optional(Type.String()) }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const root = params.root ?? currentRoot;
-      if (!root) return { content: [{ type: "text", text: "No Vordt project root set. Run /vordt-root <dir> first." }], details: {} };
-      const c = checkScope(root);
-      if (!c.ok) return { content: [{ type: "text", text: `Invalid project root: ${c.reason ?? "unknown"}` }], details: { error: c.reason } };
-      const res = archiveReport(root, params.option, params.runId ?? undefined);
-      return {
-        content: [
-          {
-            type: "text",
-            text: res.archived
-              ? `Archived prior ${params.option} report to ${res.destination}.`
-              : `${res.reason ?? "Nothing archived"}`,
-          },
-        ],
-        details: { ok: res.ok, archived: res.archived, reason: res.reason, destination: res.destination },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "vordt_validate_report",
-    label: "Vordt: check a report for required structure",
-    description:
-      "Check <root>/<option>/report.md for the shared required markers (header, coverage, handoff, source manifest).",
-    promptSnippet: "Ask vordt_validate_report before finalizing a report.",
-    promptGuidelines: [
-      "Use vordt_validate_report before finalizing a report to confirm the shared required sections are present.",
-    ],
-    parameters: Type.Object({ option: OPTION_ENUM, root: rootParam }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const root = params.root ?? currentRoot;
-      if (!root) return { content: [{ type: "text", text: "No Vordt project root set. Run /vordt-root <dir> first." }], details: {} };
-      const c = checkScope(root);
-      if (!c.ok) return { content: [{ type: "text", text: `Invalid project root: ${c.reason ?? "unknown"}` }], details: { error: c.reason } };
-      const issues = validateReport(root, params.option);
-      return {
-        content: [
-          {
-            type: "text",
-            text: issues.length ? `Issues:\n- ${issues.join("\n- ")}` : `${params.option}/report.md is structurally complete.`,
-          },
-        ],
-        details: { issues },
-      };
+    name: "vordt_validate_report", label: "Vordt: report structure checks",
+    description: "Check populated shared headers, coverage, scope digest, required pass sections and handoff. Does not validate findings or evidence correctness. Reports at most 30 issues in model-facing output.",
+    parameters: Type.Object({ option: optionSchema, root: rootParam }, { additionalProperties: false }),
+    async execute(_id, params, signal, _update, ctx) {
+      signal?.throwIfAborted();
+      const issues = validateReport(requireRoot(ctx, params.root), params.option);
+      return result({ issues }, issues.length ? `Structure issues (${issues.length}):\n${issues.slice(0, 30).map(x => `- ${x}`).join("\n")}` : "Structure checks passed; evidence correctness still requires review.");
     },
   });
 }
-
-// Named exports of the pure helpers so the test suite can exercise them directly.
-// The extension loader only uses the default export, so these are inert in Pi.
-export {
-  checkScope,
-  archiveReport,
-  buildInventory,
-  highestId,
-  validateReport,
-  utcRunId,
-};
