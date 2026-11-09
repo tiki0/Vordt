@@ -1,101 +1,103 @@
 ---
-disable-model-invocation: true
 name: scan-surface
-description: Whitebox pentesting pass 2 — attack surface mapping. Consumes the scan-structure report and finds every point of user/external input and traces how that input flows into the code. Outputs per-input descriptions, the functions it touches, and precise locations (filepath, start line, end line). Use after scan-structure, before scan-vulns.
+description: Map external input and trust boundaries using scan-structure. Record attacker control, authentication, ordered transformations, consumers, and terminal uses with exact source locations. Analysis only; run before scan-vulns. Accepts free-text focus.
+disable-model-invocation: true
 ---
 
-# scan-surface — attack surface mapping (pass 2)
+# scan-surface — input and trust-boundary mapping
 
-You are the **second** pass of a whitebox pentesting pipeline for an authorized target
-(bug bounty program with source code provided). Build the **attack surface**: find every
-point where untrusted input (user, network, file, environment, external API) enters the
-code and trace how it is used. This is **analysis only** — no exploitation, no payloads,
-no vulnerability verdicts yet. Do not modify target code.
+## Preconditions and scope
 
-## Scope & project root (MANDATORY)
+Read and follow [the shared workflow contract](../references/workflow.md) first.
+Require the injected `<VORDT_SCOPE>` block and verify `SCOPE.md` exactly in the configured
+project root. Honor authorization and exclusions; focus text can only narrow the scope.
 
-This skill is gated by the Vordt harness: it runs only when a project root is set
-(`/vordt-root <dir>`) and `SCOPE.md` exists in that directory. The invocation includes a
-`<VORDT_SCOPE>` block with the `project-root` and the full contents of `SCOPE.md`. Read it
-first and treat it as binding scope. If it is missing, stop and report that the gate was
-not applied.
+## Required inputs
 
-## Inputs (required reading first)
+- `scan-structure/report.md` (or explicitly selected archived snapshots covering the focus).
+- Current source, user focus text, and any previous surface report/history for stable IDs.
 
-Before mapping, read the prior pass's output:
+Check upstream root, scope, source freshness, and coverage before reuse. If the required
+structure analysis is missing, stale, or insufficient, write a blocked report identifying
+what `/skill:scan-structure` must refresh. Do not fabricate a missing inventory.
 
-```
-<PROJECT_ROOT>/scan-structure/report.md
-```
+## Allowed and prohibited actions
 
-It contains the function inventory you will trace against. If it is missing, stop and
-tell the user to run `/skill:scan-structure` first.
+Perform static analysis only. Do not execute/import target code, install dependencies,
+craft payloads, contact services, issue vulnerability verdicts, or modify source.
+Write assessment artifacts only under `scan-surface/`.
 
-Also honor the user's focus text in this invocation — restrict or emphasize the surface
-you map accordingly.
+## Procedure
 
-## Authorization boundary
+1. Enumerate input boundaries in the declared focus: HTTP routes, queries, bodies,
+   headers, cookies, uploads, CLI/stdin, environment/config, files, databases, queues,
+   sockets, callbacks, external APIs, and deserialization. Distinguish entrypoints from
+   intermediate reads of previously stored input.
+2. Assign/reuse `INPUT-...` IDs. Record who controls each input: unauthenticated user,
+   authenticated user/role, tenant, external service, operator, or unknown. Environment
+   variables and config are not automatically attacker-controlled. Document any required
+   second-order write that makes a database/file value attacker-controlled.
+3. Check routing, middleware, authentication, authorization, and tenant/object ownership
+   controls at entry and during use. Record evidence; absence of observed validation is
+   not a vulnerability conclusion in this pass.
+4. Trace each input through ordered transformations and branching paths, referencing
+   `FUNC-...` IDs and exact source ranges. Record validation before/after decoding,
+   normalization, casting, encoding, storage, and use. Note context-specific behavior.
+5. Identify trust-boundary crossings and terminal uses (query, process launch, file path,
+   template/output, network destination, authorization decision, state change, etc.).
+   Include ordinary consumers, not just dangerous-looking sinks. Record consumer inputs,
+   outputs/side effects, and where a flow exits the inspected code.
+6. Mark each edge observed, inferred, or unknown. Stop a trace at unresolved dynamic
+   dispatch, missing dependency internals, or unavailable code; state the exact gap.
+   Do not invent a connection to complete a source-to-sink chain.
+7. Reconcile entrypoints reviewed against the structure coverage. Report untraced inputs,
+   incomplete branches, and uncovered components with counts and continuation steps.
 
-Only proceed for code in scope per `SCOPE.md`. If scope is unclear, confirm first.
+## Output schema
 
-## Output location (required)
-
-```
-<PROJECT_ROOT>/scan-surface/
-  report.md          <- the findings report (required)
-```
-
-Create the directory if needed. Overwrite any previous `report.md` with the complete,
-current snapshot. Record the user's focus at the top.
-
-## Process
-
-1. From `scan-structure/report.md` and (re)reading source files, enumerate **input
-   sources**: HTTP endpoints/route handlers, parameter parsing (query, body, headers,
-   cookies), file uploads/reads, CLI args, env vars, config files, database reads,
-   sockets/queues/event sources, imports, deserialization points (JSON/XML/YAML/binary
-   parsing), etc.
-2. For each input point, trace its **flow** through the functions documented in
-   `scan-structure` — variable names, transformations (validation, sanitization, encoding,
-   casting), and the sinks/intermediate functions that consume it. Note whether/how the
-   input is validated or sanitized, but do not classify as a vuln here.
-3. Record exact locations (filepath, start line, end line) for the input point and for the
-   functions it reaches, using real line numbers from the files.
-
-## Report format
+Write `scan-surface/report.md`, archiving the previous report before replacement.
+Start with the **common report header**, then include:
 
 ```markdown
-# scan-surface report
-
-**Target:** `<path>`
-**Focus:** `<user focus, or "none (full codebase)">`
-**Date:** `<date>`
-**Summary:** `<total input points found; categories covered>`
+## Surface coverage
+<entrypoint categories, counts, reviewed boundaries, untraced/unknown areas>
 
 ## Input points
+### INPUT-001 — <name and source type>
+- **Location:** <project-relative path>, lines <start>–<end> (inclusive)
+- **Description:** <what the input represents and how normal code uses it>
+- **Origin/expression:** <external source and exact read/entry expression>
+- **Control:** <actor, controllable fields, constraints, direct/second-order, evidence>
+- **Authentication/authorization:** <required identity/role/ownership; checked locations>
+- **Input/output contract:** <types, defaults, parsing errors, resulting values/side effects>
+- **Trust boundaries:** <crossings and control changes, with evidence>
 
-Each entry:
+| Step | FUNC ID / location | Transformation or use | Validation/control and order | Evidence status |
+| --- | --- | --- | --- | --- |
 
-### `<input name>` — `<source type>` (`<filepath>`, lines `<start>`–`<end>`)
+- **Terminal uses:** <consumer FUNC IDs and ranges; use context and side effects>
+- **Unresolved edges:** <exact stopping points and missing evidence; or none>
 
-- **Description:** `<where the input comes from and what it represents>`
-- **Origin:** `<user/network/file/env/... and the exact entry expression>`
-- **Validation/sanitization observed:** `<none | what happens and where>`
-- **Flow:** `<ordered trace: input -> function A (file:line) -> function B (file:line) -> ... -> sink/use>`
-- **Consumers:** `<functions that use it, with file:start-end each>`
-- **Notes:** `<type assumptions, error handling, anything that affects the trace>`
+## Source manifest
+<reviewed file digests and tools, per the shared contract>
+
+## Handoff
+<the four shared handoff fields>
 ```
 
-Order by source type, then by file/line. If the user gave a focus, be exhaustive within it
-and summarize the rest.
+Order input points by source category, then file/line. Reference the source inventory
+instead of copying it wholesale. Preserve distinct branches and control assumptions.
 
-## Keep findings in context
+## Completion checklist
 
-After writing `report.md`, restate in your reply a **context summary** of the surface:
-group inputs by source type, and for the highest-value inputs give the traced flow with
-file:line locations. This is what `/skill:scan-vulns` will consume.
+- [ ] Upstream coverage/freshness validated; current focus and exclusions recorded.
+- [ ] Input IDs stable; attacker control distinguished from operator/service control.
+- [ ] Authentication, trust boundaries, transformation order, and terminal uses traced.
+- [ ] Every claimed edge has evidence status and locations; unresolved edges are explicit.
+- [ ] Coverage counts, archived prior report, source manifest, and handoff are present.
 
-## Done
+## Context handoff
 
-Confirm where `report.md` was written and summarize the most promising input flows for the
-next pass (`/skill:scan-vulns`).
+Reply with the report path, coverage, important `INPUT` IDs and traced locations, plus
+unknown edges. Recommend flows for `/skill:scan-vulns` to review without declaring them
+vulnerable in this pass.

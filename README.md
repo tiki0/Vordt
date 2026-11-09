@@ -1,9 +1,10 @@
 # Vordt — whitebox pentesting harness for Pi
 
 A pipeline of Pi skills for **authorized** whitebox security review of source code you are
-permitted to test (e.g. an in-scope bug bounty program that provides source). Analysis and
-POC work are sandboxed to local files; nothing here targets production or out-of-scope
-systems.
+permitted to test (e.g. an in-scope bug bounty program that provides source). Unless you
+set up an explicit isolation layer yourself, analysis is local but **POC execution is not
+automatically sandboxed** — you are responsible for the network, filesystem, and process
+containment of anything the exploit pass runs.
 
 ## Getting started
 
@@ -51,7 +52,7 @@ inside the project root, and keeps its summary in context for the next pass.
 | 1 | `/skill:scan-structure` | source files | `scan-structure/report.md` — function inventory (desc, inputs, outputs, file:start–end) |
 | 2 | `/skill:scan-surface` | `scan-structure/report.md` | `scan-surface/report.md` — every user/external input and how it flows into the code |
 | 3 | `/skill:scan-vulns` | structure + surface reports | `scan-vulns/report.md` — candidate vulnerabilities with descriptions and locations |
-| 4 | `/skill:exploit` | structure + surface + vulns | `exploit/report.md` + `exploit/poc/` sandbox — POCs; working ones are `VALID`-prefixed |
+| 4 | `/skill:exploit` | structure + surface + vulns | `exploit/report.md` + `exploit/poc/` workspace — POCs; working ones are `VALID`-prefixed, outcomes are `VALID`/`FAILED`/`BLOCKED`/`NOT ATTEMPTED` |
 | 5 | `/skill:report` | all prior reports | `report/report.md` — consolidated report (POCs, repro steps, CVSS, remediation, exec summary) |
 
 Every pass accepts free-text focus (e.g. `/skill:scan-vulns focus on the /admin handlers`),
@@ -68,30 +69,39 @@ The companion extension (`.pi/extensions/vordt.ts`) hard-blocks `/skill:scan-str
 
 Each skill also re-checks the injected `<VORDT_SCOPE>` block as a defense-in-depth layer and
 refuses to proceed if it is missing. All five skills set `disable-model-invocation: true`,
-so the gated `/skill:` commands are their only entry point — the model cannot silently
-invoke them without passing the gate.
+which keeps them out of automatic model routing so the gated `/skill:` commands are the
+normal entry point. That flag is an agent-routing preference, **not a security boundary**:
+it does not stop a sufficiently privileged model or user from reading or running the skill
+files another way. Treat gating as process guidance, not as a hardwall.
 
 ## Output layout (in the project root)
 
 ```
 <project-root>/
   SCOPE.md
-  scan-structure/report.md
-  scan-surface/report.md
-  scan-vulns/report.md
-  exploit/report.md
-  exploit/poc/<vuln-id>-<slug>/   (VALID-* = confirmed working POCs)
-  report/report.md
+  scan-structure/report.md          (+ scan-structure/history/...)  
+  scan-surface/report.md            (+ scan-surface/history/...)  
+  scan-vulns/report.md              (+ scan-vulns/history/...)  
+  exploit/report.md                 (+ exploit/history/...)  
+  exploit/poc/<vuln-ID>-<slug>/     (VALID-* only for actually validated POCs)
+  report/report.md                  (+ report/history/...)
 ```
+
+Each pass archives the previous report under `<option>/history/<run-id>/` before writing a
+new one, so focused or repeated scans never silently erase earlier coverage.
 
 ## Before you use this
 
 Only run these skills against code you are authorized to test. Confirm scope first and put
 it in `SCOPE.md`. POCs are intended to demonstrate a vulnerability minimally and locally —
-never to harm data, exfiltrate it, or contact systems outside the authorized scope.
+never to harm data, exfiltrate it, or contact systems outside the authorized scope. The
+exploit pass documents the isolation measures it takes before executing anything; review
+them and set up additional containment as your environment requires.
 
 ## Repo layout
 
 - `.agents/skills/<name>/SKILL.md` — the five pipeline skills.
+- `.agents/skills/references/workflow.md` — the shared contract every skill follows
+  (evidence rules, stable IDs, source snapshots, common report header, archiving, handoff).
 - `.pi/extensions/vordt.ts` — the harness companion: `/vordt-root`, SCOPE gating, and the
   bottom-left root display.

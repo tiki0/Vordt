@@ -1,103 +1,100 @@
 ---
-disable-model-invocation: true
 name: scan-structure
-description: Whitebox pentesting pass 1 — analyze a codebase's functionality (no exploitation). Maps every function/class/method with description, inputs, outputs, and precise location (filepath, start line, end line). Use to begin a whitebox security review of provided source code. Run this first; later passes (scan-surface, scan-vulns, exploit, report) depend on its output.
+description: Map source functionality without vulnerability testing. Document every in-scope function's behavior, inputs, returns, exceptions, side effects, and exact location. Run before scan-surface; accepts free-text focus.
+disable-model-invocation: true
 ---
 
-# scan-structure — functionality analysis (pass 1)
+# scan-structure — functionality inventory
 
-You are the **first** pass of a whitebox pentesting pipeline for an authorized target
-(bug bounty program with source code provided). This pass is **analysis only**: understand
-and document *what the code does*. Do **not** attempt exploitation, do not test for
-vulnerabilities, do not craft payloads, and do not modify target code.
+## Preconditions and scope
 
-Armed with the user's focus text (below), map the codebase thoroughly.
+Read and follow [the shared workflow contract](../references/workflow.md) first.
+Require the injected `<VORDT_SCOPE>` block and verify `SCOPE.md` exactly in the configured
+project root. Stop if scope is missing, invalid, or does not permit the requested analysis.
 
-## Scope & project root (MANDATORY)
+## Required inputs
 
-This skill is gated by the Vordt harness: it can only run when a project root has been set
-(`/vordt-root <dir>`) and `SCOPE.md` exists **in that directory** (it is never searched for
-alsewhere). The invocation you received includes a `<VORDT_SCOPE>` block with the
-`project-root` and the full contents of `SCOPE.md`. Read it first and treat it as the
-binding scope of this engagement. If that block is missing, stop and report that the gate
-was not applied — do not invent scope.
+- Source within the configured root and scope.
+- User focus text, if supplied; record it verbatim and define the coverage boundary.
+- Previous `scan-structure/report.md` and relevant history, if present, for stable IDs
+  and prior coverage. No earlier pipeline pass is required.
 
-## Authorization boundary
+## Allowed and prohibited actions
 
-Only proceed for code the user is authorized to test, as described in `SCOPE.md` (e.g. a
-bug bounty program in scope, or code they own). If anything the user asks for falls outside
-that scope, stop and ask for scope confirmation before doing anything.
+Perform read-only functionality analysis. Use trusted static parsers/text tools where
+available, without importing or executing target modules, build scripts, dependency
+install hooks, or tests. Do not hunt vulnerabilities, craft payloads, contact target
+services, or modify target code. Write only assessment artifacts under `scan-structure/`.
 
-## Where to find the target
+## Procedure
 
-The target codebase is the Vordt **project root** from `<VORDT_SCOPE>`, *unless* the user's
-focus text names a specific subdirectory inside it. Do not scan outside the project root.
+1. Inventory source files, languages, frameworks, entrypoints, and relevant config.
+   Record included, excluded, and unreviewed paths with reasons. Apply the shared
+   artifact exclusions; do not scan your own generated reports as application source.
+2. Map modules, entrypoints, major components, and the normal control/data flow before
+   describing individual functions. Identify dependencies whose internals are unavailable.
+3. Enumerate every callable within the coverage boundary: functions, methods, constructors,
+   accessors, nested functions, and lambdas/anonymous callbacks. Give unnamed callables a
+   descriptive label and source range. Document overload declarations separately from
+   implementations; count executable definitions separately. Include class/module
+   descriptions where helpful, but do not count them as functions unless callable.
+4. Include first-party test functions by default, labeled as tests. Exclude vendored and
+   generated code by default and state the exclusion; inspect them if explicitly in scope.
+   Use language-aware static enumeration if available and record parser limitations.
+   A text-only enumeration cannot prove completeness; disclose uncertain constructs.
+5. Read each implementation. Assign/reuse a `FUNC-...` ID and verify its project-relative,
+   inclusive 1-based range. Document parameters, external state, returns, exceptions,
+   and side effects separately. Mark inferred types and unresolved dispatch explicitly.
+6. Reconcile the discovered callable list with documented entries. Report counts by file,
+   missing entries, parse failures, and remaining work. If time/context limits intervene,
+   save a partial report and a precise continuation list rather than claiming all functions.
 
-## Output location (required)
+## Output schema
 
-Write everything into a directory named after this option, inside the Vordt project root:
-
-```
-<PROJECT_ROOT>/scan-structure/
-  report.md          <- the findings report (required)
-```
-
-Create the directory if it does not exist. If a previous `report.md` exists, **overwrite**
-it with the new, complete report (this pass produces a complete snapshot, not an append).
-If the user supplied a focus, record it at the top of the report.
-
-## Process
-
-1. Inventory the codebase: list all source files (respect `.gitignore`-style irrelevant
-   paths, skip vendored/build/third-party/node_modules/dependency directories unless the
-   user's focus says otherwise). Note languages, frameworks, entrypoints.
-2. Read the files relevant to the user's focus (or all files if no focus given).
-3. For **every** function/method (and top-level class/module where meaningful), determine
-   its exact location: filepath, the starting line number, and the ending line number.
-   Use tools that reveal line numbers (e.g. `grep -n`, `nl`, or counting lines while
-   reading). Report real line numbers from the file — do not guess.
-4. Determine, for each function: what it **does** (concise plain-language description),
-   its **inputs** (parameters, types, env/config/global state it reads), and its
-   **outputs** (return value, side effects, writes, calls made).
-
-## Report format
-
-`report.md` must contain, in order:
+Write `scan-structure/report.md`, preserving the previous report under `history/` before
+replacement. Start with the **common report header**, then include:
 
 ```markdown
-# scan-structure report
+## Architecture and normal behavior
+<codebase purpose, components, entrypoints, dependencies, major control/data flows>
 
-**Target:** `<path to target root>`
-**Focus:** `<user-provided focus text, or "none (full codebase)">`
-**Date:** `<date>`
-**Summary:** `<2-3 sentences on what the codebase is and does>`
+## Coverage inventory
+| File | Callable definitions discovered | Documented | Status / exclusions / uncertainty |
+| --- | --- | --- | --- |
 
 ## Function inventory
+### FUNC-001 — <qualified signature or anonymous-callable label>
+- **Kind:** <function/method/constructor/accessor/lambda; production/test; declaration/implementation>
+- **Location:** <project-relative path>, lines <start>–<end> (inclusive)
+- **Description:** <normal behavior and responsibility>
+- **Inputs:** <parameters, defaults, types; inferred types labeled; external state read>
+- **Returns:** <values/types; async or generator behavior; or no return>
+- **Exceptions/errors:** <raised/rejected/handled errors; or unknown>
+- **Side effects:** <writes, state changes, I/O, external calls; or none observed>
+- **Callers/callees:** <checked FUNC IDs and locations; unresolved/dynamic calls labeled>
+- **Evidence/uncertainties:** <observed vs inferred details, relevant source references>
 
-Each entry:
+## Source manifest
+<reviewed file digests and tools, per the shared contract>
 
-### `<function/method signature>` (`<filepath>`)
-
-- **Location:** lines `<start>`–`<end>` in `<filepath>`
-- **Description:** `<what it does>`
-- **Inputs:** `<parameters and external state>`
-- **Outputs:** `<return value / side effects / calls>`
-- **Callers/callees (optional):** `<brief>`
+## Handoff
+<the four shared handoff fields>
 ```
 
-Order the inventory by file, then by line number. Group related code so the report reads
-like a walkthrough of the codebase, not a bare dump. If the codebase is large and the user
-gave a focus, cover the focus areas exhaustively and summarize the rest.
+Order functions by file and starting line. Do not omit functions merely because their
+names appear routine. Distinguish known exclusions from files not yet reviewed.
 
-## Keep findings in context
+## Completion checklist
 
-After writing `report.md`, restate a concise **context summary** in your reply: the
-codebase's purpose, the main components, and the key functions you documented (with their
-file:line locations). This summary is what later passes will build on, so be specific.
-Do not silently drop details; if the codebase is huge, note the highest-value areas you
-mapped and where to look next.
+- [ ] Scope, snapshot, focus boundary, and upstream/history metadata recorded.
+- [ ] Architecture described; callable inventory reconciled with documented counts.
+- [ ] Every documented callable has a stable ID and checked range.
+- [ ] Inputs, returns, errors, and side effects are distinct; uncertainty is explicit.
+- [ ] Coverage accurately says complete, partial, or blocked; previous report preserved.
+- [ ] Source manifest and durable handoff written.
 
-## Done
+## Context handoff
 
-End by confirming where `report.md` was written and what the next pass
-(`/skill:scan-surface`) should examine, based on your summary.
+Reply with the report path, coverage, main components, key `FUNC` IDs/locations, and gaps.
+Recommend the entrypoints `/skill:scan-surface` should trace next. Do not rely on this chat
+summary as the only record.
