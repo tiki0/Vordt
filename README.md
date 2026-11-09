@@ -1,5 +1,9 @@
 # Vordt — whitebox pentesting harness for Pi
 
+**Blackbox workflow:** [setup and usage](BLACKBOX.md). The parallel `blackbox-*` skills
+and `extensions/blackbox.ts` mirror Vordt for remote enumeration → functionality mapping
+→ vulnerability scanning → PoCs → reporting, with separate state and output directories.
+
 A pipeline of Pi skills for **authorized** whitebox security review of source code you are
 permitted to test (e.g. an in-scope bug bounty program that provides source). Unless you
 set up an explicit isolation layer yourself, analysis is local but **POC execution is not
@@ -68,7 +72,7 @@ which restricts or prioritizes where it works.
 
 ## Enforced gating
 
-The companion extension (`.pi/extensions/vordt.ts`) hard-blocks `/skill:scan-structure`,
+The companion extension (`extensions/vordt.ts`) hard-blocks `/skill:scan-structure`,
 `/skill:scan-surface`, `/skill:scan-vulns`, `/skill:exploit`, and `/skill:report`:
 
 - no project root set → blocked, with a prompt to run `/vordt-root <dir>`;
@@ -140,23 +144,31 @@ them and set up additional containment as your environment requires.
 
 ## Using Vordt on a target project
 
-Add the harness to the code you are authorized to test:
+Install once for your user so Vordt is available in every project. From this repository:
 
-1. Copy (or symlink) `.pi/extensions/vordt.ts` into the target project's `.pi/extensions/`.
-2. Copy (or symlink) `.agents/skills/` to **`<target>/.agents/skills/`**, retaining the
-   five skill directories and `references/`. Pi discovers those project-local resources
-   after project trust is accepted; `/reload` (or a restart) picks them up.
-3. Create `SCOPE.md` at the target root and run `/vordt-root .` inside that project.
+```bash
+mkdir -p ~/.pi/agent/extensions ~/.pi/agent/skills
+ln -s "$PWD/extensions/vordt.ts" ~/.pi/agent/extensions/vordt.ts
+ln -s "$PWD/skills" ~/.pi/agent/skills/vordt
+```
+
+Keep this repository at the linked location. If you set `PI_CODING_AGENT_DIR`, use that
+path instead of `~/.pi/agent`. Run `/reload` (or restart Pi) to discover the global
+extension and the five whitebox skills (plus the blackbox skills in the same directory;
+load `extensions/blackbox.ts` to use them). No project-local installation is needed.
+
+Create `SCOPE.md` at the authorized target root and run `/vordt-root .` inside that
+project (or supply its absolute path). Root selection remains session-scoped.
 
 Keep the Vordt repo itself only for development; the target project stays the artifact of
 the engagement.
 
 ## Repo layout
 
-- `.agents/skills/<name>/SKILL.md` — the five pipeline skills.
-- `.agents/skills/references/workflow.md` — the shared contract every skill follows
+- `skills/<name>/SKILL.md` — the five pipeline skills.
+- `skills/references/workflow.md` — the shared contract every skill follows
   (evidence rules, stable IDs, source snapshots, common report header, archiving, handoff).
-- `.pi/extensions/vordt.ts` — the harness companion: `/vordt-root`, SCOPE gating, scope
+- `extensions/vordt.ts` — the harness companion: `/vordt-root`, SCOPE gating, scope
   injection, the bottom-left root display, and the deterministic helper tools.
 - `tests/`, `tsconfig.json`, `package.json` + lockfile — `node:test` integration tests
   against the actual extension registration boundary and strict TypeScript checking.

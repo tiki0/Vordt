@@ -3,7 +3,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { TestContext } from 'node:test';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import vordt, { checkScope, HEADER_FIELDS, HANDOFF_FIELDS, type Option } from '../.pi/extensions/vordt.ts';
+import vordt, { checkScope, HEADER_FIELDS, HANDOFF_FIELDS, type Option } from '../extensions/vordt.ts';
 
 export function fixture(t: TestContext) {
   const base = mkdtempSync(join(tmpdir(), 'vordt-test-'));

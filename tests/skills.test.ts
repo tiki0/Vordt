@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OPTIONS } from '../.pi/extensions/vordt.ts';
+import { OPTIONS } from '../extensions/vordt.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 for (const name of OPTIONS) {
-  const path = resolve(root, '.agents/skills', name, 'SKILL.md');
+  const path = resolve(root, 'skills', name, 'SKILL.md');
   const text = readFileSync(path, 'utf8');
   test(`${name} frontmatter declares the matching name, description and explicit invocation`, () => {
     const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
@@ -31,7 +31,7 @@ for (const name of OPTIONS) {
   });
 }
 test('workflow contract documents exact current helper contracts', () => {
-  const workflow = readFileSync(resolve(root, '.agents/skills/references/workflow.md'), 'utf8');
+  const workflow = readFileSync(resolve(root, 'skills/references/workflow.md'), 'utf8');
   for (const marker of ['shared bookkeeping under `.vordt/`', 'existingId', 'exclusions', 'Inventory', 'Source manifest']) {
     assert.ok(workflow.toLowerCase().includes(marker.toLowerCase()), `missing workflow marker ${marker}`);
   }

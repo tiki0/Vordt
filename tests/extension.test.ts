@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, symlinkSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { OPTIONS, checkScope } from '../.pi/extensions/vordt.ts';
+import { OPTIONS, checkScope } from '../extensions/vordt.ts';
 import { fixture, harness, put, report } from './helpers.ts';
 
 for (const option of OPTIONS) for (const suffix of ['', ' focus on src', '\nfocus on src', '\tfocus on src', '  ']) {

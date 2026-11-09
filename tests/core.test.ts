@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileS
 import { join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { archiveReport, buildInventory, checkScope, reserveId, safePath, validateReport, OPTIONS } from '../.pi/extensions/vordt.ts';
+import { archiveReport, buildInventory, checkScope, reserveId, safePath, validateReport, OPTIONS } from '../extensions/vordt.ts';
 import { fixture, put, report } from './helpers.ts';
 
 for (const kind of ['missing', 'empty', 'whitespace', 'directory', 'symlink', 'oversized']) {
@@ -205,7 +205,7 @@ test('preexisting locks fail visibly and never overwrite state', t => {
 test('concurrent processes reserve distinct IDs without lost updates', async t => {
   const { root } = fixture(t);
   const worker = async (identity: string): Promise<string> => new Promise((resolve, reject) => {
-    const script = `import {reserveId} from './.pi/extensions/vordt.ts';
+    const script = `import {reserveId} from './extensions/vordt.ts';
       let value; for(let n=0;n<100;n++){try{value=reserveId(process.argv[1], 'FUNC', process.argv[2]);break}catch(e){if(!e.message.includes('locked'))throw e;await new Promise(r=>setTimeout(r,10));}}
       if(!value)throw Error('lock timed out');console.log(value.id);`;
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script, root, identity]);
