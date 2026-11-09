@@ -65,6 +65,14 @@ pass must rerun. Legacy reports lacking metadata require source revalidation and
 explicit limitation. Treat uncovered areas as unknown, never as already reviewed.
 If relevant source or scope changes during a run, stop and report the inconsistency.
 
+Validate freshness efficiently: read each upstream report's **header and summary first**,
+then load only the sections relevant to the current focus (the coverage inventory, the
+specific `FUNC-`/`INPUT-`/`VORDT-` entries, and the handoff). Re-verify from source the
+files those entries depend on; re-check the **file inventory** (not just digests of already
+reviewed files) so newly added files are not silently out of scope of the snapshot.
+Checkpoint by component where possible so an interrupted pass can resume instead of
+restarting, and mark in-progress reports `partial` with a precise continuation list.
+
 ## Common report header
 
 Every `<option>/report.md` starts with its title and these fields (use explicit `none`,
@@ -92,6 +100,26 @@ that the program is secure. A focused scan may be complete within its stated bou
 never describe it as whole-project coverage. Mark interrupted/incomplete work `partial`.
 Include a **Source manifest** listing reviewed file paths and content digests after the
 pass-specific report body. Describe material tools, versions, and commands used.
+
+## Harness tooling (use it, then verify)
+
+The Vordt extension registers deterministic helpers as tools the agent can call directly.
+They reduce error-prone bookkeeping; their outputs still count as evidence and must be
+reported, not presumed:
+
+- `vordt_manifest` — at pass start, record the UTC run id, git revision, SCOPE digest, and
+  a per-file SHA-256 inventory under `.vordt/manifests/<run-id>.json`. Use its run id for
+  the report header and `history/` archiving.
+- `vordt_ids` — before assigning any `FUNC-`/`INPUT-`/`VORDT-` id, ask for the highest
+  already-allocated number (across `report.md` and `history/`) so stable IDs are never
+  reused. It counts any mention, so a value may be higher than the count of headings.
+- `vordt_archive` — before replacing a report, move the prior `report.md` to
+  `history/<run-id>/report.md` with collision-safe suffixes.
+- `vordt_validate_report` — before finishing, check the report for the shared required
+  markers (header fields, handoff, source manifest).
+
+If a tool is unavailable or fails, fall back to the manual procedure described below and
+record the deviation. Never treat a tool failure as permission to skip the requirement.
 
 ## Coverage and reruns
 

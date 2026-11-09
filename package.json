@@ -1,0 +1,12 @@
+{
+  "name": "vordt",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Vordt — whitebox pentesting harness companion for Pi (scope-gated /skill: commands, scope injection, deterministic pipeline helpers).",
+  "scripts": {
+    "test": "node tests/vordt.test.mjs",
+    "typecheck": "node tests/typecheck.mjs",
+    "check": "npm run typecheck && npm test"
+  }
+}

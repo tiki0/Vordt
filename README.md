@@ -20,7 +20,12 @@ a mandatory `SCOPE.md` in that exact directory (it is never searched for anywher
 
    The command refuses to set a root that has no `SCOPE.md` inside it.
 3. The configured root is shown in the **bottom-left footer status line**, along with a
-   warning when `SCOPE.md` is missing.
+   warning when `SCOPE.md` is missing. `clear`/`none` (or an empty argument) clears it.
+
+**Session-scoped:** the root is stored per Pi session, not globally, so a new session in
+another project does not silently inherit a previous engagement's root. The old global
+`root` field in the config file is migrated to the session that first starts after upgrade.
+While a run is in progress the root is locked and `/vordt-root` refuses to change it.
 
 ## SCOPE.md
 
@@ -74,17 +79,37 @@ normal entry point. That flag is an agent-routing preference, **not a security b
 it does not stop a sufficiently privileged model or user from reading or running the skill
 files another way. Treat gating as process guidance, not as a hardwall.
 
+The gate also refuses empty, whitespace-only, symlinked, or oversized `SCOPE.md` files, and
+its checks are the single source of truth shared by `/vordt-root`, the footer status, and
+the skill gate.
+
+## Deterministic helpers
+
+The extension registers four tools the pipeline agent calls directly to remove error-prone
+bookkeeping (the workflow contract explains when to use each):
+
+| Tool | Purpose |
+|------|---------|
+| `vordt_manifest` | UTC run id + git revision + per-file SHA-256 inventory to `.vordt/manifests/<run-id>.json` |
+| `vordt_ids` | highest allocated `FUNC-`/`INPUT-`/`VORDT-` id across reports and history (run before allocating) |
+| `vordt_archive` | move `<option>/report.md` to `<option>/history/<run-id>/report.md` (collision-safe) |
+| `vordt_validate_report` | check a report for the shared required markers before handoff |
+
+In non-interactive modes (`print`/`json`) blocked invocations and persistence failures are
+logged to `vordt.log` in the agent config dir instead of silently returning.
+
 ## Output layout (in the project root)
 
 ```
 <project-root>/
   SCOPE.md
-  scan-structure/report.md          (+ scan-structure/history/...)  
-  scan-surface/report.md            (+ scan-surface/history/...)  
-  scan-vulns/report.md              (+ scan-vulns/history/...)  
-  exploit/report.md                 (+ exploit/history/...)  
+  scan-structure/report.md          (+ scan-structure/history/...)
+  scan-surface/report.md            (+ scan-surface/history/...)
+  scan-vulns/report.md              (+ scan-vulns/history/...)
+  exploit/report.md                 (+ exploit/history/...)
   exploit/poc/<vuln-ID>-<slug>/     (VALID-* only for actually validated POCs)
   report/report.md                  (+ report/history/...)
+  .vordt/manifests/<run-id>.json    (machine bookkeeping, via vordt_manifest)
 ```
 
 Each pass archives the previous report under `<option>/history/<run-id>/` before writing a
@@ -98,10 +123,26 @@ never to harm data, exfiltrate it, or contact systems outside the authorized sco
 exploit pass documents the isolation measures it takes before executing anything; review
 them and set up additional containment as your environment requires.
 
+## Using Vordt on a target project
+
+Add the harness to the code you are authorized to test:
+
+1. Copy (or symlink) `.pi/extensions/vordt.ts` into the target project's `.pi/extensions/`.
+2. Copy (or symlink) `.agents/skills/` into the target project root (the five `SKILL.md`
+   files plus `references/`). `Pi` discovers project-local extensions and skills from
+   there; `/reload` (or a restart) picks them up.
+3. Create `SCOPE.md` at the target root and run `/vordt-root .` inside that project.
+
+Keep the Vordt repo itself only for development; the target project stays the artifact of
+the engagement.
+
 ## Repo layout
 
 - `.agents/skills/<name>/SKILL.md` — the five pipeline skills.
 - `.agents/skills/references/workflow.md` — the shared contract every skill follows
   (evidence rules, stable IDs, source snapshots, common report header, archiving, handoff).
-- `.pi/extensions/vordt.ts` — the harness companion: `/vordt-root`, SCOPE gating, and the
-  bottom-left root display.
+- `.pi/extensions/vordt.ts` — the harness companion: `/vordt-root`, SCOPE gating, scope
+  injection, the bottom-left root display, and the deterministic helper tools.
+- `tests/` + `package.json` — strict type-check against the installed Pi types, and a
+  functional suite for the scope gate, ID allocation, archiving, manifests, and the
+  `/skill:` injection format. Run `npm test` and `npm run typecheck`.

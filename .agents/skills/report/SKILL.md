@@ -20,10 +20,12 @@ findings.
 - User focus text (e.g. "executive first", "only HIGH+", "HackerOne format"), and any
   previous final report/history for context and ID continuity.
 
-Validate upstream scope, source freshness, coverage, and verification status. This pass
-must not silently refresh stale analysis or run any new test; if an upstream report is
-missing, stale, or insufficient, write a blocked report naming the pass to rerun and stop
-there. Do not convert a candidate with no execution evidence into a confirmed finding.
+Validate upstream scope, source freshness, coverage, and verification status.
+Freshness checks are read-only: you may stat, hash, and read source to compare against the
+recorded snapshots, but you must not run imports, tests, or any other new probe. This pass
+must not silently refresh stale analysis; if any input this report depends on is missing,
+stale, or insufficient, write a blocked report naming the pass to rerun and stop there.
+Do not convert a candidate with no execution evidence into a confirmed finding.
 
 ## Allowed and prohibited actions
 
@@ -85,12 +87,18 @@ header** followed by:
 ## Remediation summary
 <prioritized, grouped by component/theme, referencing finding IDs>
 
+## Source manifest
+<reviewed file digests and tools, per the shared contract>
+
 ## Appendix
 - **Methodology:** <pipeline passes run, tools used, limitations>
 - **Source inventory:** <summary pointers to scan-structure>
 - **Input surface inventory:** <summary pointers to scan-surface>
 - **Evidence artifacts:** <paths to report directories and POC artifacts>
 - **Unresolved questions:** <what remains unknown for each finding or scope; or none>
+
+## Handoff
+<the four shared handoff fields>
 ```
 
 Order findings by severity (highest first), then file/line, without renumbering IDs.
@@ -98,7 +106,7 @@ Let the report's accuracy honestly reflect the pipeline's coverage and verificat
 
 ## Completion checklist
 
-- [ ] Upstream reports validated and archived before replacement.
+- [ ] Upstream reports validated; the prior final report archived before replacement.
 - [ ] Split verified vs unverified accurately; IDs and locations carried through.
 - [ ] Executive summary, findings, remediation, and appendix are complete.
 - [ ] CVSS versioned, justified, or explicitly not scored.
