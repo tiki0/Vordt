@@ -12,24 +12,32 @@ vulnerabilities, do not craft payloads, and do not modify target code.
 
 Armed with the user's focus text (below), map the codebase thoroughly.
 
+## Scope & project root (MANDATORY)
+
+This skill is gated by the Vordt harness: it can only run when a project root has been set
+(`/vordt-root <dir>`) and `SCOPE.md` exists **in that directory** (it is never searched for
+alsewhere). The invocation you received includes a `<VORDT_SCOPE>` block with the
+`project-root` and the full contents of `SCOPE.md`. Read it first and treat it as the
+binding scope of this engagement. If that block is missing, stop and report that the gate
+was not applied — do not invent scope.
+
 ## Authorization boundary
 
-Only proceed for code the user is authorized to test (e.g. a bug bounty program in scope,
-or code they own). If the request seems to target unauthorized systems, stop and ask for
-scope confirmation before doing anything.
+Only proceed for code the user is authorized to test, as described in `SCOPE.md` (e.g. a
+bug bounty program in scope, or code they own). If anything the user asks for falls outside
+that scope, stop and ask for scope confirmation before doing anything.
 
 ## Where to find the target
 
-The target code is the project you were invoked inside (the current working directory
-and its subdirectories), *unless* the user's message names a different directory or repo.
-If the user names a target path, analyze that instead.
+The target codebase is the Vordt **project root** from `<VORDT_SCOPE>`, *unless* the user's
+focus text names a specific subdirectory inside it. Do not scan outside the project root.
 
 ## Output location (required)
 
-Write everything into a directory named after this option, inside the target project root:
+Write everything into a directory named after this option, inside the Vordt project root:
 
 ```
-<TARGET_PROJECT>/scan-structure/
+<PROJECT_ROOT>/scan-structure/
   report.md          <- the findings report (required)
 ```
 

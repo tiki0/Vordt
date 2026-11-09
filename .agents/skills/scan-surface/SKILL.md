@@ -11,12 +11,20 @@ point where untrusted input (user, network, file, environment, external API) ent
 code and trace how it is used. This is **analysis only** — no exploitation, no payloads,
 no vulnerability verdicts yet. Do not modify target code.
 
+## Scope & project root (MANDATORY)
+
+This skill is gated by the Vordt harness: it runs only when a project root is set
+(`/vordt-root <dir>`) and `SCOPE.md` exists in that directory. The invocation includes a
+`<VORDT_SCOPE>` block with the `project-root` and the full contents of `SCOPE.md`. Read it
+first and treat it as binding scope. If it is missing, stop and report that the gate was
+not applied.
+
 ## Inputs (required reading first)
 
 Before mapping, read the prior pass's output:
 
 ```
-<TARGET_PROJECT>/scan-structure/report.md
+<PROJECT_ROOT>/scan-structure/report.md
 ```
 
 It contains the function inventory you will trace against. If it is missing, stop and
@@ -27,12 +35,12 @@ you map accordingly.
 
 ## Authorization boundary
 
-Only proceed for code in scope of an authorized test. If scope is unclear, confirm first.
+Only proceed for code in scope per `SCOPE.md`. If scope is unclear, confirm first.
 
 ## Output location (required)
 
 ```
-<TARGET_PROJECT>/scan-surface/
+<PROJECT_ROOT>/scan-surface/
   report.md          <- the findings report (required)
 ```
 

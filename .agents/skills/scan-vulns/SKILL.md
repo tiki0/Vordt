@@ -11,13 +11,20 @@ document **candidate vulnerabilities**. This pass is **static analysis and reaso
 do not execute attacks, do not run exploits, do not contact remote systems, and do not
 modify target code. Real exploitation is the next pass (`/skill:exploit`).
 
+## Scope & project root (MANDATORY)
+
+This skill is gated by the Vordt harness: it runs only when a project root is set
+(`/vordt-root <dir>`) and `SCOPE.md` exists in that directory. The invocation includes a
+`<VORDT_SCOPE>` block with the `project-root` and the full contents of `SCOPE.md`. Read it
+first and honor its scope. If it is missing, stop and report that the gate was not applied.
+
 ## Inputs (required reading first)
 
 Read **both** prior reports before analyzing:
 
 ```
-<TARGET_PROJECT>/scan-structure/report.md
-<TARGET_PROJECT>/scan-surface/report.md
+<PROJECT_ROOT>/scan-structure/report.md
+<PROJECT_ROOT>/scan-surface/report.md
 ```
 
 If either is missing, stop and tell the user to run the missing pass first.
@@ -25,12 +32,12 @@ Honor the user's focus text: narrow or prioritize your vulnerability hunting acc
 
 ## Authorization boundary
 
-Only analyze in-scope, authorized code. If scope is unclear, confirm first.
+Only analyze in-scope, authorized code per `SCOPE.md`. If scope is unclear, confirm first.
 
 ## Output location (required)
 
 ```
-<TARGET_PROJECT>/scan-vulns/
+<PROJECT_ROOT>/scan-vulns/
   report.md          <- the findings report (required)
 ```
 

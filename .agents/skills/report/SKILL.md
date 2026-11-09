@@ -9,15 +9,22 @@ You are the **final** pass of a whitebox pentesting pipeline for an authorized t
 (bug bounty program with source code provided). Compile everything into a single,
 submission-ready report — and stay honest about what is verified vs. theoretical.
 
+## Scope & project root (MANDATORY)
+
+This skill is gated by the Vordt harness: it runs only when a project root is set
+(`/vordt-root <dir>`) and `SCOPE.md` exists in that directory. The invocation includes a
+`<VORDT_SCOPE>` block with the `project-root` and the full contents of `SCOPE.md`. Read it
+first and write the report for that scope. If it is missing, stop.
+
 ## Inputs (required reading first)
 
 Read all prior reports:
 
 ```
-<TARGET_PROJECT>/scan-structure/report.md
-<TARGET_PROJECT>/scan-surface/report.md
-<TARGET_PROJECT>/scan-vulns/report.md
-<TARGET_PROJECT>/exploit/report.md      (if it exists)
+<PROJECT_ROOT>/scan-structure/report.md
+<PROJECT_ROOT>/scan-surface/report.md
+<PROJECT_ROOT>/scan-vulns/report.md
+<PROJECT_ROOT>/exploit/report.md      (if it exists)
 ```
 
 `exploit/report.md` may be absent if exploitation was not authorized or not yet run; in
@@ -28,7 +35,7 @@ items lack a verified POC. Honor the user's focus text (e.g. "executive summary 
 ## Output location (required)
 
 ```
-<TARGET_PROJECT>/report/
+<PROJECT_ROOT>/report/
   report.md          <- the consolidated report (required)
 ```
 
