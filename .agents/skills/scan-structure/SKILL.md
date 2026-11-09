@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: scan-structure
 description: Whitebox pentesting pass 1 — analyze a codebase's functionality (no exploitation). Maps every function/class/method with description, inputs, outputs, and precise location (filepath, start line, end line). Use to begin a whitebox security review of provided source code. Run this first; later passes (scan-surface, scan-vulns, exploit, report) depend on its output.
 ---

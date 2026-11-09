@@ -67,7 +67,9 @@ The companion extension (`.pi/extensions/vordt.ts`) hard-blocks `/skill:scan-str
 - otherwise, the root path and `SCOPE.md` contents are injected into the invocation.
 
 Each skill also re-checks the injected `<VORDT_SCOPE>` block as a defense-in-depth layer and
-refuses to proceed if it is missing.
+refuses to proceed if it is missing. All five skills set `disable-model-invocation: true`,
+so the gated `/skill:` commands are their only entry point — the model cannot silently
+invoke them without passing the gate.
 
 ## Output layout (in the project root)
 

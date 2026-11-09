@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: scan-surface
 description: Whitebox pentesting pass 2 — attack surface mapping. Consumes the scan-structure report and finds every point of user/external input and traces how that input flows into the code. Outputs per-input descriptions, the functions it touches, and precise locations (filepath, start line, end line). Use after scan-structure, before scan-vulns.
 ---

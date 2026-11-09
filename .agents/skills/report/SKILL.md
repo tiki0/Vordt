@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: report
 description: Whitebox pentesting pass 5 — final report compilation. Consumes all prior reports (scan-structure, scan-surface, scan-vulns, exploit) and produces one consolidated MD report: per-finding proof-of-concept, reproducible steps, CVSS severity, remediation guidance, and an executive summary. Use after exploit (or after scan-vulns if no exploitation was authorized/possible).
 ---

@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: scan-vulns
 description: Whitebox pentesting pass 3 — vulnerability identification. Consumes scan-structure and scan-surface reports, finds likely vulnerabilities in the code (injection, authz/authn flaws, unsafe deserialization, path traversal, SSRF, RCE, logic flaws, crypto misuse, etc.), and documents each with description, affected functions, and precise location (filepath, start line, end line). Use after scan-surface, before exploit.
 ---
