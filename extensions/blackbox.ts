@@ -494,7 +494,10 @@ export default async function blackbox(pi: ExtensionAPI, worker?: WorkerScope) {
       } catch (error) { diagnostic(ctx, errorText(error)); }
     },
   });
-  for (const option of OPTIONS) {
+  // In one-shot workers, a registerCommand → pi.sendUserMessage alias is fire-and-forget:
+  // print mode awaits only the command handler and can dispose the run before it starts.
+  // Route worker aliases through the original input prompt instead, so Pi awaits the skill.
+  for (const option of worker ? [] : OPTIONS) {
     pi.registerCommand(option, {
       description: `Run /skill:${option} through the same scope gate`,
       handler: async (args, ctx) => {
@@ -508,7 +511,7 @@ export default async function blackbox(pi: ExtensionAPI, worker?: WorkerScope) {
     });
   }
   pi.on("input", async (event, ctx) => {
-    const match = event.text.match(/^\/skill:([^\s]+)([\s\S]*)$/);
+    const match = event.text.match(worker ? /^\/(?:skill:)?([^\s]+)([\s\S]*)$/ : /^\/skill:([^\s]+)([\s\S]*)$/);
     if (!match || !(OPTIONS as readonly string[]).includes(match[1])) return { action: "continue" };
     try {
       const root = requireRoot(ctx);

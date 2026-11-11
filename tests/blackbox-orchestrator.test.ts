@@ -79,6 +79,17 @@ test('worker roots are pinned, digest-bound, and cannot recursively orchestrate'
   assert.equal((await h.handlers.input({ text: '/skill:blackbox-enum example.invalid' }, ctx)).action, 'handled');
 });
 
+for (const phase of OPTIONS) test(`worker /${phase} transforms the original prompt without fire-and-forget dispatch`, async t => {
+  const { base, root } = fixture(t), h = harness(base, { root, sha256: checkScope(root).sha256 }), ctx = h.context('worker');
+  await h.ready;
+  assert.equal(h.commands[phase], undefined);
+  const value = await h.handlers.input({ text: `/${phase} offline fixture` }, ctx);
+  assert.equal(value.action, 'transform');
+  assert.ok(value.text.startsWith(`/skill:${phase} offline fixture\n`));
+  assert.ok(value.text.includes('<BLACKBOX_SCOPE>'));
+  assert.equal(h.userMessages.length, 0);
+});
+
 test('worker invocation selects a single skill, literal alias, tools and inherited model', () => {
   const value: WorkerRequest = { root: '/tmp/root', scopeSha256: 'a'.repeat(64), repo, phase: 'blackbox-enum',
     focus: 'example.invalid; not a shell command', model: 'provider/model', thinking: 'high', timeoutSeconds: 60 };
@@ -183,11 +194,76 @@ test('real pinned Pi CLI expands literal worker alias and blocks malformed scope
   assert.equal(existsSync(join(root, 'blackbox-enum')), false);
 });
 
+test('real CLI awaits the literal worker alias through scope, skill expansion and assistant completion', async t => {
+  const { base, root } = fixture(t);
+  const marker = join(root, 'offline-worker-marker.json');
+  const req: WorkerRequest = { ...request(root), model: 'blackbox-fixture/worker', phase: 'blackbox-enum',
+    focus: 'offline local fixture only; do not contact any host', timeoutSeconds: 20 };
+  const args = workerArgs(req);
+  args.splice(args.indexOf('--'), 0, '--extension', join(repo, 'tests/fixtures/blackbox-provider.ts'));
+  const value = await runWorkerProcess({ command: process.execPath, args: [
+    join(repo, 'node_modules/@earendil-works/pi-coding-agent/dist/cli.js'), '--offline', ...args,
+  ] }, root, { ...process.env, PI_OFFLINE: '1', PI_CODING_AGENT_DIR: join(base, 'config'),
+    BLACKBOX_FIXTURE_MARKER: marker, BLACKBOX_WORKER_SCOPE: JSON.stringify({ root, sha256: req.scopeSha256 }) }, 20);
+  assert.equal(value.exitCode, 0);
+  assert.equal(value.failure, undefined);
+  assert.equal(value.assistantSeen, true);
+  assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8')), {
+    phase: 'blackbox-enum', skillExpanded: true, scopeInjected: true, delegated: true,
+  });
+});
+
+test('real offline CLI workers advance enum→map and persist startup diagnostics', async t => {
+  const { base, root } = fixture(t);
+  const value = await executePlan({ ...request(root), model: 'blackbox-fixture/worker' }, parsePlan('offline fixture only'),
+    undefined, undefined, async req => {
+      const reportFixture = put(root, `fixtures/${req.phase}.md`, report(root, req.phase, 'complete', `NEW-${req.phase}`));
+      const args = workerArgs(req);
+      args.splice(args.indexOf('--'), 0, '--extension', join(repo, 'tests/fixtures/blackbox-provider.ts'));
+      return runWorkerProcess({ command: process.execPath, args: [
+        join(repo, 'node_modules/@earendil-works/pi-coding-agent/dist/cli.js'), '--offline', ...args,
+      ] }, root, { ...process.env, PI_OFFLINE: '1', PI_CODING_AGENT_DIR: join(base, 'config'),
+        BLACKBOX_FIXTURE_PHASE: req.phase, BLACKBOX_FIXTURE_REPORT: reportFixture,
+        BLACKBOX_WORKER_SCOPE: JSON.stringify({ root, sha256: req.scopeSha256 }) }, 20);
+    });
+  assert.equal(value.status, 'complete', value.error);
+  assert.deepEqual(value.phases.map(x => [x.phase, x.status]), [['blackbox-enum', 'complete'], ['blackbox-map', 'complete']]);
+  assert.ok(value.phases.every(x => x.worker?.assistantSeen && x.worker.diagnostics?.agentStarted));
+  const state = JSON.parse(readFileSync(join(root, value.statePath), 'utf8'));
+  assert.equal(state.phases[0].worker.diagnostics.agentStarted, true);
+});
+
+test('process runner distinguishes pre-agent exits from model execution failures', async t => {
+  const { root } = fixture(t);
+  const early = await runWorkerProcess({ command: process.execPath, args: ['-e',
+    'console.log(JSON.stringify({type:"session",id:"fixture"}))'] }, root, process.env, 5);
+  assert.equal(early.exitCode, 0);
+  assert.equal(early.assistantSeen, false);
+  assert.equal(early.diagnostics?.agentStarted, false);
+  assert.match(early.failure!, /before starting an agent run/);
+  const started = await runWorkerProcess({ command: process.execPath, args: ['-e',
+    'console.log(JSON.stringify({type:"agent_start"}))'] }, root, process.env, 5);
+  assert.equal(started.diagnostics?.agentStarted, true);
+  assert.match(started.failure!, /started but produced no completed assistant/);
+});
+
+test('startup authentication diagnostics are classified without retaining raw stderr or secrets', async t => {
+  const { root } = fixture(t);
+  const value = await runWorkerProcess({ command: process.execPath, args: ['-e',
+    'console.error("No API key found for provider private-fixture-value");process.exitCode=1'] }, root, process.env, 5);
+  assert.match(value.failure!, /authentication failed/);
+  assert.ok(value.diagnostics!.stderrBytes > 0);
+  assert.ok(!JSON.stringify(value).includes('private-fixture-value'));
+});
+
 test('process runner reads final JSON without newline and does not forward raw output', async t => {
   const { root } = fixture(t);
   const value = await runWorkerProcess({ command: process.execPath, args: ['-e',
     'console.error("secret fixture stderr");process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant",stopReason:"stop",content:[{type:"text",text:"secret fixture"}]}}))'] }, root, process.env, 5);
-  assert.deepEqual(value, { exitCode: 0, assistantSeen: true, failure: undefined });
+  assert.equal(value.exitCode, 0);
+  assert.equal(value.assistantSeen, true);
+  assert.equal(value.failure, undefined);
+  assert.equal(value.diagnostics?.jsonRecords, 1);
   assert.ok(!JSON.stringify(value).includes('secret'));
 });
 

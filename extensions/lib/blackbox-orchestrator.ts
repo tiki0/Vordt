@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import {
   OPTIONS, checkScope, ensureDirs, publish, readBounded, safePath, utcRunId, validateReport,
   type Option, type WorkerScope,
@@ -49,7 +50,10 @@ export interface WorkerRequest {
   root: string; scopeSha256: string; phase: Option; focus: string; repo: string;
   model?: string; thinking?: string; timeoutSeconds: number;
 }
-export interface ProcessResult { exitCode: number; assistantSeen: boolean; failure?: string; }
+export interface ProcessResult {
+  exitCode: number; assistantSeen: boolean; failure?: string;
+  diagnostics?: { agentStarted: boolean; jsonRecords: number; stdoutBytes: number; stderrBytes: number };
+}
 export interface Invocation { command: string; args: string[]; }
 export function piInvocation(args: string[]): Invocation {
   // Same runtime selection as Pi's official subagent example; never invoke a shell.
@@ -77,6 +81,9 @@ export async function runWorkerProcess(invocation: Invocation, cwd: string, env:
   signal?.throwIfAborted();
   return new Promise(resolve => {
     let assistantSeen = false, failure: string | undefined, pending = "", bytes = 0;
+    let startupHint: string | undefined, stderrTail = "";
+    const stdoutDecoder = new StringDecoder("utf8"), stderrDecoder = new StringDecoder("utf8");
+    const diagnostics = { agentStarted: false, jsonRecords: 0, stdoutBytes: 0, stderrBytes: 0 };
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const proc = spawn(invocation.command, invocation.args, { cwd, env, shell: false,
       detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
@@ -98,6 +105,8 @@ export async function runWorkerProcess(invocation: Invocation, cwd: string, env:
       if (!value.trim()) return;
       try {
         const event = JSON.parse(value);
+        diagnostics.jsonRecords++;
+        if (event?.type === "agent_start") diagnostics.agentStarted = true;
         if (event.type === "message_end" && event.message?.role === "assistant") {
           assistantSeen = true;
           if (["error", "aborted"].includes(event.message.stopReason)) stop("Worker model failed or aborted");
@@ -107,23 +116,41 @@ export async function runWorkerProcess(invocation: Invocation, cwd: string, env:
     };
     proc.stdout.on("data", (chunk: Buffer) => {
       bytes += chunk.length;
+      diagnostics.stdoutBytes += chunk.length;
       if (bytes > 32 * 1024 * 1024) { stop("Worker output budget exceeded"); return; }
-      pending += chunk.toString("utf8");
+      pending += stdoutDecoder.write(chunk);
       if (Buffer.byteLength(pending) > 2 * 1024 * 1024) { pending = ""; stop("Worker JSON line budget exceeded"); return; }
       const lines = pending.split("\n"); pending = lines.pop() ?? "";
       for (const item of lines) line(item);
     });
     proc.stderr.on("data", (chunk: Buffer) => {
       bytes += chunk.length;
+      diagnostics.stderrBytes += chunk.length;
+      // Keep only a bounded in-memory tail for allowlisted classifications, never raw logs.
+      stderrTail = (stderrTail + stderrDecoder.write(chunk)).slice(-8192);
+      if (/No API key found|Authentication failed for|No credentials|credentials (?:have )?expired/i.test(stderrTail)) {
+        startupHint = "Worker authentication failed; check the inherited provider's credentials or re-authenticate in Pi";
+      } else if (/No model selected|Unknown model|Model [^\n]{0,200}not found|Could not resolve model/i.test(stderrTail)) {
+        startupHint ??= "Worker model selection failed; check that the inherited model is available without other extensions";
+      } else if (/Failed to load extension|Extension error [^\n]{0,200}send_user_message/i.test(stderrTail)) {
+        startupHint ??= "Worker extension loading or prompt dispatch failed; check the installation and command routing";
+      }
       if (bytes > 32 * 1024 * 1024) stop("Worker output budget exceeded");
     });
     proc.on("error", () => { failure ??= "Unable to spawn Pi worker; check Pi installation and credentials"; });
     proc.on("close", code => {
+      pending += stdoutDecoder.end();
       if (pending) line(pending);
       clearTimeout(timeout); clearTimeout(killTimer);
       signal?.removeEventListener("abort", abort);
       if (failure) kill("SIGKILL"); // Also reap surviving POSIX process-group descendants.
-      resolve({ exitCode: code ?? 1, assistantSeen, failure });
+      const exitCode = code ?? 1;
+      if (!assistantSeen && !failure) {
+        failure = startupHint ?? (diagnostics.agentStarted
+          ? `Worker started but produced no completed assistant response (exit ${exitCode}); inspect model/authentication or JSON protocol handling`
+          : `Worker exited before starting an agent run (exit ${exitCode}); check prompt/alias dispatch or startup configuration, not target behavior`);
+      }
+      resolve({ exitCode, assistantSeen, failure, diagnostics });
     });
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -152,7 +179,7 @@ function checkedReport(root: string, option: Option) {
 }
 export interface OrchestrationResult {
   runId: string; statePath: string; status: "running" | "complete" | "stopped";
-  phases: { phase: Option; status: "running" | "complete" | "stopped"; report?: ReturnType<typeof checkedReport> }[];
+  phases: { phase: Option; status: "running" | "complete" | "stopped"; report?: ReturnType<typeof checkedReport>; worker?: ProcessResult }[];
   error?: string;
 }
 export async function executePlan(request: Omit<WorkerRequest, "phase" | "focus" | "timeoutSeconds">,
@@ -189,6 +216,7 @@ export async function executePlan(request: Omit<WorkerRequest, "phase" | "focus"
       const step: OrchestrationResult["phases"][number] = { phase: option, status: "running" };
       state.phases.push(step); save();
       const result = await dispatch({ ...request, phase: option, focus: plan.focus, timeoutSeconds: plan.timeoutSeconds }, signal);
+      step.worker = result;
       signal?.throwIfAborted();
       if (checkScope(request.root).sha256 !== request.scopeSha256) throw new Error("Scope changed during worker execution");
       if (result.failure || result.exitCode !== 0 || !result.assistantSeen) throw new Error(result.failure ?? `${option} worker failed (exit ${result.exitCode}, assistant=${result.assistantSeen}); inspect phase artifacts and model configuration`);

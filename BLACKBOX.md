@@ -127,8 +127,10 @@ Direct `/skill:blackbox-orchestrate` without a current command-approved plan is 
 Grants are session-scoped and expire when the agent settles or the extension reloads.
 
 Each phase starts a fresh **Pi subprocess/context**, inheriting the parent's provider/model
-and thinking level. The subprocess literally receives `/blackbox-<phase>`, which forwards
-to the same gated `/skill:blackbox-<phase>` command as manual use. Each worker loads only
+and thinking level. The subprocess literally receives `/blackbox-<phase>`, which transforms
+the original input into the same gated `/skill:blackbox-<phase>` command as manual use.
+Workers do not launch a second fire-and-forget prompt: one-shot JSON mode must await the
+entire original skill run before exiting. Each worker loads only
 its bundled phase skill, Blackbox helpers, and core read/bash/edit/write tools. Discovered
 extensions, MCP, prompt templates, context files, and project trust-gated resources are
 disabled for workers. No extra subagent package or global agent definitions are required.
@@ -155,11 +157,22 @@ Progress and handoffs are recorded at:
 ```
 
 This includes the fixed plan, model, scope digest, phase statuses, report paths, hashes,
-and run IDs. Raw child JSON/tool transcripts are **not persisted or forwarded** to the
+and run IDs. Each finished worker also records its exit code, whether an assistant response
+was seen, and startup counters (`agentStarted`, JSON record count, stdout/stderr byte counts).
+Raw child JSON/tool transcripts are **not persisted or forwarded** to the
 coordinator model; sanitized phase reports/evidence are the durable record. Output parsing
 is bounded (32 MiB aggregate stdout/stderr, 2 MiB buffered JSON line); excess output stops
 the worker. Worker failures return a bounded diagnostic; inspect phase artifacts and
 provider configuration instead of assuming a failed process means the target is safe.
+
+If a worker exits without a completed assistant response, the diagnostic distinguishes
+an exit **before `agent_start`** (launch/input routing or startup configuration) from a
+run that started but never completed an assistant response. Known authentication/model/
+extension startup errors are classified using fixed messages, without retaining raw
+stderr or credential values. An exit code of zero alone never means the phase ran.
+Older versions could return `exit 0, assistant=false` because a short-command wrapper
+started a fire-and-forget prompt; reload the updated extension and rerun the approved plan
+rather than changing model credentials solely on the basis of that symptom.
 
 Cancel with Escape/Ctrl+C as appropriate for Pi. Abort and timeout terminate the worker's
 POSIX process group, with forced-kill fallback; Windows uses direct-child termination and
