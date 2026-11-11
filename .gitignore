@@ -1,3 +1,23 @@
 node_modules/
 .tmp/
 *.log
+
+# Local credentials (examples may be deliberately tracked after review).
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Engagement output belongs outside this development repository.
+/.vordt/
+/.blackbox/
+/scan-structure/
+/scan-surface/
+/scan-vulns/
+/exploit/
+/report/
+/blackbox-enum/
+/blackbox-map/
+/blackbox-vulns/
+/blackbox-poc/
+/blackbox-report/

@@ -1,187 +1,240 @@
-# Vordt — whitebox pentesting harness for Pi
+# Vordt — whitebox and blackbox pentesting workflows for Pi
 
-**Blackbox workflow:** [setup and usage](BLACKBOX.md). The parallel `blackbox-*` skills
-and `extensions/blackbox.ts` mirror Vordt for remote enumeration → functionality mapping
-→ vulnerability scanning → PoCs → reporting, with separate state and output directories.
-Use `/blackbox-orchestrate <target>` for enum→map subagents, or explicitly extend the
-plan with `--through=report` (PoCs require `--with-poc`). Short `/blackbox-*` commands
-also invoke individual phases.
+Scope-gated skills and extensions for **authorized** security assessments:
 
-A pipeline of Pi skills for **authorized** whitebox security review of source code you are
-permitted to test (e.g. an in-scope bug bounty program that provides source). Unless you
-set up an explicit isolation layer yourself, analysis is local but **POC execution is not
-automatically sandboxed** — you are responsible for the network, filesystem, and process
-containment of anything the exploit pass runs.
+- **Whitebox:** inspect source → map inputs → triage vulnerabilities → local PoCs → report.
+- **Blackbox:** enumerate accessible assets → map functionality → scan vulnerabilities →
+  attempt scoped PoCs → report. No target source code required.
+- **Blackbox orchestrator:** coordinate a finite, user-approved plan using separate Pi
+  subagents, each invoking a literal `/blackbox-<phase>` command.
 
-## Getting started
+Both workflows keep stable IDs, evidence manifests, archived reports, and durable handoffs.
+**Neither workflow is an OS/network sandbox.** Scope interpretation and phase restrictions
+are agent instructions; use external containment and supervise testing as appropriate.
 
-Vordt requires a **project root** — a directory you set once per engagement — that contains
-a mandatory `SCOPE.md` in that exact directory (it is never searched for anywhere else).
+## Install globally
 
-1. Put a `SCOPE.md` in the root of the code you are authorized to test.
-2. In Pi, set the root:
+From this repository, link both extensions and the shared skills directory:
 
-   ```
-   /vordt-root /path/to/target-project
-   ```
+```bash
+PI_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+mkdir -p "$PI_DIR/extensions" "$PI_DIR/skills"
+ln -s "$PWD/extensions/vordt.ts" "$PI_DIR/extensions/vordt.ts"
+ln -s "$PWD/extensions/blackbox.ts" "$PI_DIR/extensions/blackbox.ts"
+ln -s "$PWD/skills" "$PI_DIR/skills/vordt"
+```
 
-   The command refuses to set a root that has no `SCOPE.md` inside it.
-3. The configured root is shown in the **bottom-left footer status line**, along with a
-   warning when the root/scope is invalid. `/vordt-root` with no arguments displays it;
-   `/vordt-root clear` or `/vordt-root none` clears it.
+Skip links that already point here; inspect existing files before replacing them. Keep
+this repository at the linked location. The Blackbox extension resolves its worker helpers
+from this repository, so they do not need separate global links. The skills link includes
+all five whitebox skills, five blackbox phase skills, and the coordinator skill.
 
-**Session-scoped:** validated root state is stored in separate files under
-`$PI_CODING_AGENT_DIR/vordt/sessions/` (default `~/.pi/agent/vordt/sessions/`), keyed by
-session ID and working directory. There is no global cached-root fallback. Legacy
-`vordt.json` roots are deliberately **not migrated**: select the engagement explicitly
-after upgrading. While Pi is busy, both root selection and clearing are refused.
-Persistence uses per-session locking and atomic writes; failures leave the old state intact.
+Run **`/reload`** or restart Pi. Global installation makes the workflows available in other
+projects; engagement roots remain explicitly selected **per session**. No project-local
+installation is needed. You can load either extension independently, but each workflow
+requires its matching extension.
 
-## SCOPE.md
+## Scope and engagement roots
 
-A plain Markdown file that declares the authorized scope of the engagement. Keep it at the
-top level of the project root (for example `/path/to/target-project/SCOPE.md`). A useful
-minimum:
+Create `SCOPE.md` yourself in the exact directory selected as the engagement root:
 
 ```markdown
 # Scope
 
-**Program / authorization:** <bug bounty program name, ticket, or contract reference>
-**Authorized tester:** <who is allowed to run this>
-**In-scope:** <files, endpoints, hosts, or the whole codebase>
-**Out-of-scope / do not touch:** <explicit exclusions, production, third parties>
-**Rules of engagement:** <what testing is permitted, and anything prohibited>
-**Contact / embargo:** <how and where to submit findings>
+- Authorization: <program/contract/ticket, tester, testing window>
+- In scope: <source paths OR exact hosts, protocols, ports, URL paths>
+- Out of scope: <exclusions, production restrictions, third parties>
+- Permitted methods: <enumeration, mapping, vulnerability checks, PoC effects>
+- Operational limits: <rates, concurrency, request/time budgets, stop conditions>
+- Test identities/data: <approved accounts, roles, owned objects, cleanup rules>
+- Contact/data handling: <engagement contact, redaction and retention requirements>
 ```
 
-The harness injects the full contents of `SCOPE.md` into every skill invocation, and every
-skill is instructed to treat it as binding scope.
+For whitebox, select the authorized source directory:
 
-## Pipeline
-
-Run the passes in order. Each pass writes its findings to a directory of the same name
-inside the project root, and keeps its summary in context for the next pass.
-
-| # | Skill | Inputs it consumes | What it produces |
-|---|-------|--------------------|------------------|
-| 1 | `/skill:scan-structure` | source files | `scan-structure/report.md` — function inventory (desc, inputs, outputs, file:start–end) |
-| 2 | `/skill:scan-surface` | `scan-structure/report.md` | `scan-surface/report.md` — every user/external input and how it flows into the code |
-| 3 | `/skill:scan-vulns` | structure + surface reports | `scan-vulns/report.md` — candidate vulnerabilities with descriptions and locations |
-| 4 | `/skill:exploit` | structure + surface + vulns | `exploit/report.md` + `exploit/poc/` workspace — POCs; working ones are `VALID`-prefixed, outcomes are `VALID`/`FAILED`/`BLOCKED`/`NOT ATTEMPTED` |
-| 5 | `/skill:report` | all prior reports | `report/report.md` — consolidated report (POCs, repro steps, CVSS, remediation, exec summary) |
-
-Every pass accepts free-text focus (e.g. `/skill:scan-vulns focus on the /admin handlers`),
-which restricts or prioritizes where it works.
-
-## Enforced gating
-
-The companion extension (`extensions/vordt.ts`) hard-blocks `/skill:scan-structure`,
-`/skill:scan-surface`, `/skill:scan-vulns`, `/skill:exploit`, and `/skill:report`:
-
-- no project root set → blocked, with a prompt to run `/vordt-root <dir>`;
-- root set but `SCOPE.md` absent from that root → blocked, with a prompt to create it;
-- otherwise, the root path and `SCOPE.md` contents are injected into the invocation.
-
-Each skill also re-checks the injected `<VORDT_SCOPE>` block as a defense-in-depth layer and
-refuses to proceed if it is missing. All five skills set `disable-model-invocation: true`,
-which keeps them out of automatic model routing so the gated `/skill:` commands are the
-normal entry point. That flag is an agent-routing preference, **not a security boundary**:
-it does not stop a sufficiently privileged model or user from reading or running the skill
-files another way. Treat gating as process guidance, not as a hardwall.
-
-The gate also refuses empty, whitespace-only, symlinked, or oversized `SCOPE.md` files, and
-its checks are the single source of truth shared by `/vordt-root`, the footer status, and
-the skill gate.
-
-## Deterministic helpers
-
-The extension registers four tools the pipeline agent calls directly to remove error-prone
-bookkeeping (the workflow contract explains when to use each):
-
-| Tool | Purpose |
-|------|---------|
-| `vordt_manifest` | Stream hashes for explicit approved `paths`/`exclusions`; publish an exclusive UTC/UUID inventory with limits/errors recorded |
-| `vordt_ids` | Atomically reserve/reuse a `type` + stable source `identity` in `.vordt/ids.json`; optionally adopt a historically backed `existingId` |
-| `vordt_archive` | Archive the prior report under **its own** run ID; legacy fallback and collision-safe suffixes |
-| `vordt_validate_report` | Check populated shared headers, coverage, scope, pass-specific sections, manifest and handoff—not evidence correctness |
-
-Helpers always use the selected session root. Optional compatibility `root` arguments
-must canonically match it. Artifact paths reject traversal and symlink components;
-archives/manifests never overwrite existing evidence. Scope authorization is still
-interpreted by the agent: inventory paths must be approved before hashing. Inventory
-coverage is separate from review coverage. Missing/unreadable paths and size/file-count
-limits are explicit partial results, never silently treated as complete.
-
-In non-interactive modes (`print`/`json`), blocked commands emit a custom diagnostic
-message and stderr output visible to the caller. Tool failures are signaled as errors.
-These filesystem checks are not a sandbox against another process maliciously replacing
-ancestors during I/O; use a controlled filesystem and OS containment for hostile code.
-An abandoned bookkeeping lock fails closed; inspect it manually after confirming its
-owner is no longer running.
-
-## Output layout (in the project root)
-
+```text
+/vordt-root /path/to/source-project
 ```
-<project-root>/
+
+For blackbox, select a local artifact directory; no source checkout is required:
+
+```text
+/blackbox-root /path/to/engagement
+```
+
+Both commands require a readable, nonempty `SCOPE.md` directly inside that directory.
+It is never searched for elsewhere. No arguments displays the current root; `clear` or
+`none` clears it. Root changes are refused while Pi is busy. Footer status shows the
+selection and scope errors.
+
+The two roots are independent, even when they refer to the same directory. State is
+stored under `$PI_CODING_AGENT_DIR/{vordt,blackbox}/sessions/` (default `~/.pi/agent/`),
+keyed by session ID and working directory. There is no global-root fallback; legacy
+`vordt.json` roots are deliberately not migrated.
+
+The extension injects the selected root, scope contents, and SHA-256 digest into gated
+skill invocations. Skills must verify authorization and restrictions before proceeding.
+**A target argument or nonempty scope file is not proof of permission.** Focus narrows
+scope; discoveries, redirects, DNS names, shared IPs, and third-party links do not expand it.
+
+## Blackbox quick start
+
+After setting `/blackbox-root`, run individual phases manually:
+
+| Command | Purpose | Main output |
+| --- | --- | --- |
+| `/blackbox-enum <target> [focus]` | Discover accessible ports, services, webpages, vhosts, subdomains; **no vulnerability testing** | `blackbox-enum/report.md` |
+| `/blackbox-map [focus]` | Map normal functionality, inputs, roles, workflows and side effects; **no vulnerability testing** | `blackbox-map/report.md` |
+| `/blackbox-vulns [focus]` | Perform permitted bounded checks and triage candidates | `blackbox-vulns/report.md` |
+| `/blackbox-poc [IDs / constraints]` | Attempt minimal proofs for existing candidates | `blackbox-poc/report.md` + `poc/` artifacts |
+| `/blackbox-report [format / focus]` | Compile existing evidence, CVSS and remediation; **no new target requests** | `blackbox-report/report.md` |
+
+Short commands forward to the same scope-gated `/skill:blackbox-<phase>` invocations.
+Targets may be IPv4, IPv6, IP:port (bracket IPv6 when specifying a port), hostnames, URLs
+with base paths, or other explicitly scoped service locators. The agent chooses installed
+tools such as nmap, dig, ffuf, gobuster, curl, browsers, or protocol clients within the
+phase boundary and operational limits. It does not install missing tools automatically.
+
+### Orchestrated subagents
+
+```text
+# Default: enumeration → mapping only
+/blackbox-orchestrate https://app.example.invalid
+
+# Enumeration → mapping → vulnerability scanning → report; no PoCs
+/blackbox-orchestrate --through=report https://app.example.invalid
+
+# Full pipeline, explicitly including PoC attempts
+/blackbox-orchestrate --through=report --with-poc https://app.example.invalid
+
+# Resume after reviewing/resolving a blocker, with valid upstream reports
+/blackbox-orchestrate --from=map --through=report --timeout=900 https://app.example.invalid
+```
+
+Flags precede target/focus text. `--from` and `--through` accept `enum`, `map`, `vulns`,
+`poc`, or `report`. PoC delegation always requires `--with-poc`. Worker timeout defaults
+to 1800 seconds per phase (allowed range: 10–7200 seconds).
+
+The coordinator delegates through `blackbox_orchestrate` with a one-use command-approved
+plan. Workers run **sequentially**, each in a separate Pi process/context, inheriting the
+parent's model selection and thinking level. Each worker loads only its phase skill,
+Blackbox helpers, and core read/bash/edit/write tools. Other discovered extensions, MCP,
+context files, prompt templates, and project trust-gated resources are disabled. Providers
+registered only by disabled extensions are not inherited. Child API usage is billed by
+the provider but is not aggregated into the parent's footer totals.
+
+The coordinator stops on failed workers, timeout/cancellation, scope changes, invalid or
+unchanged reports, or partial/blocked coverage. It does not silently retry or expand the
+plan. Complete PoC passes may contain FAILED/BLOCKED attempt outcomes; these are preserved
+for reporting, not converted into proof of safety. Workers must stop if noninteractive
+clarification is needed. Resume only after reviewing the blocker and upstream relevance.
+
+Progress is saved to **`.blackbox/orchestrations/<run-id>/state.json`**, with the approved
+plan, phase statuses, report paths, run IDs, and hashes. Raw child transcripts are not
+persisted by the coordinator; sanitized phase evidence remains the durable record. One
+coordinator may own a root at a time; manual phase commands are refused while its lock
+exists. Arbitrary tools and external processes are not locked out.
+
+For full details, examples, evidence layout, cancellation behavior, and limitations, see
+**[BLACKBOX.md](BLACKBOX.md)**.
+
+## Whitebox quick start
+
+Run passes in order against the selected source root:
+
+| Skill | Purpose | Main output |
+| --- | --- | --- |
+| `/skill:scan-structure` | Read-only architecture/function inventory, behavior, inputs/outputs and checked source ranges | `scan-structure/report.md` |
+| `/skill:scan-surface` | Map external inputs, transformations, consumers and trust boundaries | `scan-surface/report.md` |
+| `/skill:scan-vulns` | Static vulnerability triage, prerequisites and counter-evidence | `scan-vulns/report.md` |
+| `/skill:exploit` | Minimal isolated local PoCs for existing findings | `exploit/report.md` + `poc/` artifacts |
+| `/skill:report` | Consolidate findings, reproducible proofs, CVSS and remediation | `report/report.md` |
+
+All passes accept free-text focus, for example `/skill:scan-vulns focus on admin handlers`.
+The first three whitebox passes do not execute target code or contact services. The
+exploit pass requires documented containment before local execution; an artifact directory
+is not an isolation boundary. PoCs are optional if exploitation is not authorized. The
+Blackbox orchestrator does **not** orchestrate these whitebox passes.
+
+## Evidence, history, and helpers
+
+All paths resolve under the selected root, not necessarily Pi's working directory:
+
+```text
+<engagement-root>/
   SCOPE.md
-  scan-structure/report.md          (+ scan-structure/history/...)
-  scan-surface/report.md            (+ scan-surface/history/...)
-  scan-vulns/report.md              (+ scan-vulns/history/...)
-  exploit/report.md                 (+ exploit/history/...)
-  exploit/poc/<vuln-ID>-<slug>/<run-id>/attempt-<N>/  (exclusive; VALID-* only after validation)
-  report/report.md                  (+ report/history/...)
-  .vordt/manifests/<run-id>.json     (inventory, not proof of review)
-  .vordt/ids.json                   (durable ID reservations)
+  <phase>/report.md
+  <phase>/history/<previous-run-id>/report.md
+  blackbox-{enum,map,vulns}/evidence/<run-id>/...
+  {exploit,blackbox-poc}/poc/<finding-id>-<slug>/<run-id>/attempt-<N>/...
+  .vordt/{ids.json,manifests/<run-id>.json}
+  .blackbox/{ids.json,manifests/<run-id>.json,orchestrations/<run-id>/state.json}
 ```
 
-Each pass archives the previous report under `<option>/history/<run-id>/` before writing a
-new one, so focused or repeated scans never silently erase earlier coverage.
+Each workflow registers `*_ids`, `*_manifest`, `*_archive`, and `*_validate_report` tools:
 
-## Before you use this
+- **IDs:** durable atomic reservation/reuse; whitebox uses `FUNC`, `INPUT`, `VORDT`, while
+  blackbox uses `ASSET`, `FUNC`, `BLACKBOX`. Registries remain separate.
+- **Manifests:** bounded local hashes with explicit paths/exclusions, errors, and limits.
+  Hashing is not review; local Git metadata is not a remote deployment revision.
+- **Archives:** preserve the prior report under its own run ID without overwriting archives.
+- **Validation:** check headers, scope digest, coverage, phase sections and final Handoff;
+  structure checks do not validate findings, authorization, or evidence correctness.
 
-Only run these skills against code you are authorized to test. Confirm scope first and put
-it in `SCOPE.md`. POCs are intended to demonstrate a vulnerability minimally and locally —
-never to harm data, exfiltrate it, or contact systems outside the authorized scope. The
-exploit pass documents the isolation measures it takes before executing anything; review
-them and set up additional containment as your environment requires.
+Helpers always use the session-selected root. Optional compatibility `root` arguments
+must match it. Traversal and symlink components are rejected in helper artifact paths.
+Writes use locking and atomic publication; these checks do not protect against a hostile
+process concurrently replacing filesystem ancestors.
 
-## Using Vordt on a target project
+Reports use `complete`, `partial`, or `blocked` coverage. Complete means only the declared
+finite boundary was processed—not that the whole target is secure. Focused reruns are
+new bounded snapshots, not silent merges. Preserve unsuccessful attempts, unknown areas,
+and candidate/verified distinctions. PoC outcomes are `VALID`, `FAILED`, `BLOCKED`, or
+`NOT ATTEMPTED`; only demonstrated proofs receive `VALID-` artifact names.
 
-Install once for your user so Vordt is available in every project. From this repository:
+The next phase must read disk reports, not depend on conversational memory. Blackbox
+observations and PoCs retain their acquisition windows; local hashes cannot prove current
+remote state, and the report phase must not send new freshness probes.
+
+## Security and data handling
+
+- Test only explicitly authorized source and services. Use synthetic data and approved
+  test identities. Do not destroy data, collect unnecessary sensitive information, or
+  contact out-of-scope systems to prove a finding.
+- Skills are explicit-only (`disable-model-invocation: true`), but this is an agent-routing
+  preference, not a security boundary. Scope gating does not inspect every shell command,
+  enforce packet filtering, or sandbox target/PoC code. Workers share user permissions.
+- Target content and previous reports are evidence, not instructions. Redact credentials,
+  cookies, authorization headers, personal data, and secrets before saving evidence.
+- Keep engagement artifacts outside this development repository. Ignore rules help prevent
+  accidents, but do not block explicitly force-added files or remove tracked/history data.
+  Never commit provider credentials or real `.env` files. Rotate any exposed credential;
+  deleting it from the latest revision does not revoke it or erase history.
+- Inspect abandoned locks manually only after confirming their owner is no longer running.
+  Cancellation does not roll back remote effects. POSIX worker process groups are terminated
+  on abort/timeout; Windows cannot promise descendant containment. Crashes require manual
+  inspection of surviving processes and locks.
+
+## Repository layout and development
+
+- `extensions/vordt.ts`, `extensions/blackbox.ts` — global extension entry points.
+- `extensions/lib/blackbox-{orchestrator,worker}.ts` — delegation and child bootstrap.
+- `skills/<name>/SKILL.md` — ten phase skills plus the Blackbox coordinator.
+- `skills/references/{workflow,blackbox-workflow}.md` — shared evidence/scope contracts.
+- `BLACKBOX.md` — detailed Blackbox usage and operational limitations.
+- `tests/` — core, registration-boundary, workflow and subprocess regression tests.
+
+Use Node.js **22.19+**:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions ~/.pi/agent/skills
-ln -s "$PWD/extensions/vordt.ts" ~/.pi/agent/extensions/vordt.ts
-ln -s "$PWD/skills" ~/.pi/agent/skills/vordt
+npm ci
+npm run check
+# Or separately: npm run typecheck; npm test
+npm audit
 ```
 
-Keep this repository at the linked location. If you set `PI_CODING_AGENT_DIR`, use that
-path instead of `~/.pi/agent`. Run `/reload` (or restart Pi) to discover the global
-extension and the five whitebox skills (plus the blackbox skills in the same directory;
-load `extensions/blackbox.ts` to use them). No project-local installation is needed.
-
-Create `SCOPE.md` at the authorized target root and run `/vordt-root .` inside that
-project (or supply its absolute path). Root selection remains session-scoped.
-
-Keep the Vordt repo itself only for development; the target project stays the artifact of
-the engagement.
-
-## Repo layout
-
-- `skills/<name>/SKILL.md` — the five pipeline skills.
-- `skills/references/workflow.md` — the shared contract every skill follows
-  (evidence rules, stable IDs, source snapshots, common report header, archiving, handoff).
-- `extensions/vordt.ts` — the harness companion: `/vordt-root`, SCOPE gating, scope
-  injection, the bottom-left root display, and the deterministic helper tools.
-- `tests/`, `tsconfig.json`, `package.json` + lockfile — `node:test` integration tests
-  against the actual extension registration boundary and strict TypeScript checking.
-
-## Development checks
-
-Use Node.js 22.19+ and run `npm ci` followed by `npm run check`. Development dependencies
-(Pi types, TypeScript, TypeBox and the TS test loader) are pinned in the lockfile; checks
-do not search for a system compiler or the newest installed Pi release. `npm test` and
-`npm run typecheck` may also be run separately. Tests use disposable fixtures and mocked
-Pi registrations, exercise real handlers/tools, and label environment-dependent skips.
-They do not run a live model or prove an OS sandbox. Host-provided Pi/TypeBox imports
-remain supplied by Pi at runtime; development dependencies are not engagement payloads.
+Development dependencies are pinned in `package-lock.json`; Pi supplies host imports at
+runtime. Tests use disposable local fixtures, mocked Pi handlers, fake worker processes,
+and offline CLI gate checks. They do not run live target scans or a live model and cannot
+prove agent compliance or an OS sandbox. `npm audit` checks known dependency advisories;
+passing it or the test suite does not establish that all security issues are absent.
