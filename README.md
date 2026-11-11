@@ -3,6 +3,9 @@
 **Blackbox workflow:** [setup and usage](BLACKBOX.md). The parallel `blackbox-*` skills
 and `extensions/blackbox.ts` mirror Vordt for remote enumeration → functionality mapping
 → vulnerability scanning → PoCs → reporting, with separate state and output directories.
+Use `/blackbox-orchestrate <target>` for enum→map subagents, or explicitly extend the
+plan with `--through=report` (PoCs require `--with-poc`). Short `/blackbox-*` commands
+also invoke individual phases.
 
 A pipeline of Pi skills for **authorized** whitebox security review of source code you are
 permitted to test (e.g. an in-scope bug bounty program that provides source). Unless you

@@ -32,7 +32,11 @@ Pi's cwd. No target source code is required or presumed available.
 
 ## Phase boundaries and tools
 
-The user invokes each phase separately; never automatically launch the next skill.
+The user invokes each phase separately, or explicitly approves a finite plan with
+`/blackbox-orchestrate`. Only that coordinator may advance through its approved plan;
+phase workers never launch another skill or delegate recursively. Orchestration defaults
+to enum→map, skips PoCs without `--with-poc`, and stops on partial/blocked/invalid results.
+Delegation does not change any phase's allowed actions or scope requirements.
 
 | Phase | Permitted activity | Not permitted |
 | --- | --- | --- |
@@ -83,7 +87,10 @@ Use synthetic markers and dedicated authorized test accounts/objects.
 ## Stable identities and output paths
 
 Each pass writes only its own `blackbox-<phase>/` directory, with shared bookkeeping under
-`.blackbox/` as the explicit exception. Never modify other passes, scope, or target source.
+`.blackbox/` as the explicit exception. The coordinator records its approved plan, phase
+statuses, report run IDs and hashes under `.blackbox/orchestrations/<run-id>/state.json`.
+Only one coordinator may own a root at a time; do not run manual phases in the same root
+concurrently. Child raw transcripts are discarded; sanitized phase evidence is durable. Never modify other passes, scope, or target source.
 Use `evidence/<run-id>/` for enumeration/mapping/scanning and
 `poc/<BLACKBOX-id>-<slug>/<run-id>/attempt-<N>/` for PoCs. Create run/attempt directories
 exclusively; refuse collisions, preserve previous evidence, and do not follow symlinks.
@@ -189,4 +196,6 @@ Run `blackbox_validate_report` and resolve structural issues. End every report w
 ```
 
 Final chat reply: report path, coverage, short handoff. Disk reports, not conversational
-memory, are the durable record. Do not invoke another phase without the user's request.
+memory, are the durable record. Do not invoke another phase without the user's request
+or the coordinator's explicit human-approved plan. A phase worker must always stop after
+its own phase, even when invoked by the coordinator.

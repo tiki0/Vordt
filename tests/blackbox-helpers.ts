@@ -38,20 +38,35 @@ export function report(root: string, option: Option = 'blackbox-report', coverag
 
 // A mock of Pi's registration boundary, not a reimplementation of the extension.
 // Intentionally loose callbacks permit direct tests of runtime-invalid arguments too.
-export function harness(base: string) {
+export function harness(base: string, worker?: Parameters<typeof blackbox>[1]) {
   const handlers: Record<string, (...args: any[]) => any> = {};
   const commands: Record<string, { handler: (...args: any[]) => any }> = {};
   const tools: Record<string, { execute: (...args: any[]) => any; parameters: any }> = {};
-  const messages: any[] = [], notices: any[] = [], statuses: any[] = [];
+  const messages: any[] = [], notices: any[] = [], statuses: any[] = [], userMessages: any[] = [];
+  const listeners: Record<string, ((...args: any[]) => any)[]> = {};
   const api = {
-    on: (name: string, fn: (...args: any[]) => any) => { handlers[name] = fn; },
+    on: (name: string, fn: (...args: any[]) => any) => {
+      (listeners[name] ??= []).push(fn);
+      handlers[name] = async (event: any, ctx: any) => {
+        let result: any;
+        for (const listener of listeners[name]) {
+          const next = await listener(event, ctx);
+          if (next?.action === 'handled') return next;
+          if (next?.action === 'transform') { event = { ...event, text: next.text }; result = next; }
+          else if (name !== 'input' && next !== undefined) result = next;
+        }
+        return result ?? (name === 'input' ? { action: 'continue' } : undefined);
+      };
+    },
     registerCommand: (name: string, command: any) => { commands[name] = command; },
     registerTool: (tool: any) => { tools[tool.name] = tool; },
     sendMessage: (message: any) => { messages.push(message); },
+    sendUserMessage: (message: any, options: any) => { userMessages.push({ message, options }); },
   };
   const old = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = join(base, 'config');
-  try { blackbox(api as unknown as ExtensionAPI); } finally {
+  let ready: Promise<void>;
+  try { ready = blackbox(api as unknown as ExtensionAPI, worker); } finally {
     if (old === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = old;
   }
@@ -61,7 +76,7 @@ export function harness(base: string) {
     ui: { notify: (...x: any[]) => notices.push(x), setStatus: (...x: any[]) => statuses.push(x) },
   });
   return {
-    handlers, commands, tools, messages, notices, statuses, context,
+    handlers, commands, tools, messages, notices, statuses, userMessages, context, ready,
     call: (name: string, params: any, ctx: any, signal?: AbortSignal) => tools[name].execute('test', params, signal, undefined, ctx),
   };
 }

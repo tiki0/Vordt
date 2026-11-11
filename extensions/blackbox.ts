@@ -3,6 +3,7 @@
  * These checks are not an OS sandbox. Do not run against a concurrently hostile filesystem.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import {
   constants, closeSync, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync,
@@ -66,7 +67,7 @@ export function safePath(root: string, rel: string): string {
   return target;
 }
 
-function ensureDirs(root: string, rel: string): string {
+export function ensureDirs(root: string, rel: string): string {
   const target = safePath(root, rel);
   let current = root;
   for (const part of relative(root, target).split(sep).filter(Boolean)) {
@@ -79,7 +80,7 @@ function ensureDirs(root: string, rel: string): string {
 }
 
 /** Bounded, no-follow read. Check the opened descriptor, not just a preceding stat. */
-function readBounded(root: string, rel: string, max = MAX_REPORT): string {
+export function readBounded(root: string, rel: string, max = MAX_REPORT): string {
   const path = safePath(root, rel);
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -122,7 +123,7 @@ function assertOption(option: string): asserts option is Option {
 /** Same-directory temp + fsync + link gives atomic, exclusive publication; rename
  * replaces only private state while holding its lock. Never overwrite evidence.
  */
-function publish(root: string, rel: string, text: string, replace = false) {
+export function publish(root: string, rel: string, text: string, replace = false) {
   const target = safePath(root, rel);
   const parent = relative(root, dirname(target)) || ".";
   ensureDirs(root, parent);
@@ -418,7 +419,8 @@ export async function buildInventory(root: string, options: InventoryOptions, si
 
 interface RootConfig { format: 2; session: string; cwd: string; root: string | null; }
 /** Per-session files avoid global read/modify/write races. Same-session writes are locked. */
-export default function blackbox(pi: ExtensionAPI) {
+export interface WorkerScope { root: string; sha256: string; }
+export default async function blackbox(pi: ExtensionAPI, worker?: WorkerScope) {
   const configDir = resolve(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
   const stateRoot = () => {
     mkdirSync(configDir, { recursive: true, mode: 0o700 });
@@ -434,6 +436,10 @@ export default function blackbox(pi: ExtensionAPI) {
     return `blackbox/sessions/${hash(JSON.stringify([s.id, s.cwd]))}.json`;
   };
   const selectedRoot = (ctx: ExtensionContext): string | null => {
+    if (worker) {
+      if (checkScope(worker.root).sha256 !== worker.sha256) throw new Error("Delegated scope changed; stop and reinvoke from the parent");
+      return worker.root;
+    }
     const rel = sessionFile(ctx);
     const base = stateRoot();
     if (!statOrMissing(safePath(base, rel))) return null; // Never inherit legacy global roots.
@@ -474,6 +480,7 @@ export default function blackbox(pi: ExtensionAPI) {
       try {
         const input = args.trim();
         if (!input) { diagnostic(ctx, `Blackbox root: ${selectedRoot(ctx) ?? "none — use /blackbox-root <dir>"}`, "info"); return; }
+        if (worker) throw new Error("Delegated worker root is pinned by the orchestrator");
         if (!ctx.isIdle()) throw new Error("Root is locked while a run is in progress");
         const root = ["clear", "none"].includes(input) ? null : canonicalRoot(resolve(ctx.cwd,
           input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input));
@@ -487,11 +494,25 @@ export default function blackbox(pi: ExtensionAPI) {
       } catch (error) { diagnostic(ctx, errorText(error)); }
     },
   });
+  for (const option of OPTIONS) {
+    pi.registerCommand(option, {
+      description: `Run /skill:${option} through the same scope gate`,
+      handler: async (args, ctx) => {
+        try {
+          const root = requireRoot(ctx);
+          if (!worker && statOrMissing(safePath(root, ".blackbox/orchestrator.lock"))) throw new Error("This root is owned by an orchestrator; wait before running a manual phase");
+          if (!ctx.isIdle()) throw new Error("Wait for the current run before starting a phase");
+          pi.sendUserMessage(`/skill:${option} ${args.trim()}`, { expandPromptTemplates: true });
+        } catch (error) { diagnostic(ctx, errorText(error)); }
+      },
+    });
+  }
   pi.on("input", async (event, ctx) => {
     const match = event.text.match(/^\/skill:([^\s]+)([\s\S]*)$/);
     if (!match || !(OPTIONS as readonly string[]).includes(match[1])) return { action: "continue" };
     try {
       const root = requireRoot(ctx);
+      if (!worker && statOrMissing(safePath(root, ".blackbox/orchestrator.lock"))) throw new Error("This root is owned by an orchestrator; wait before running a manual phase");
       const scope = checkScope(root);
       const focus = match[2].trim();
       if (/<\/?BLACKBOX_SCOPE\b/.test(focus + scope.content)) throw new Error("Ambiguous BLACKBOX_SCOPE delimiter in focus or scope");
@@ -550,4 +571,11 @@ export default function blackbox(pi: ExtensionAPI) {
       return result({ issues }, issues.length ? `Structure issues (${issues.length}):\n${issues.slice(0, 30).map(x => `- ${x}`).join("\n")}` : "Structure checks passed; evidence correctness still requires review.");
     },
   });
+  if (!worker) {
+    // Pi's TS loader resolves relative imports from the installed symlink path.
+    // Resolve our real repository first so the documented single-file global link works.
+    const repo = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
+    const { registerOrchestrator } = await import(join(repo, "extensions/lib/blackbox-orchestrator.ts"));
+    registerOrchestrator(pi, { requireRoot, diagnostic, repo });
+  }
 }
